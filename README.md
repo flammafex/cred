@@ -63,6 +63,10 @@ cargo run -p cred-cli -- record add examples/presentation.json \
   --record-id record-presentation-1 \
   --cred-id cred:local:example
 
+cargo run -p cred-cli -- grant check \
+  --grant examples/permission-grant.json \
+  --request examples/action-request.json
+
 cargo run -p cred-cli -- present \
   --request examples/action-request.json \
   --artifact examples/manifest.json \
@@ -88,8 +92,8 @@ The first implementation is deliberately small:
 2. Validate and hash Cred JSON artifacts.
 3. Build `cred.artifact_record` metadata.
 4. Accept a `cred.action_request` file.
-5. Return a mocked `cred.presentation` for embedded or referenced artifacts.
+5. Enforce `cred.permission_grant` constraints for an action request.
+6. Return a mocked `cred.presentation` for embedded or referenced artifacts.
 
 That is enough to prove the app boundary before adding real key custody,
-permission grant enforcement, Freebird issuance, Witness timestamping, or
-Matchlock derivation.
+Freebird issuance, Witness timestamping, or Matchlock derivation.

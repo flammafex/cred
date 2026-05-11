@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use cred_core::{
-    artifact_record, artifact_type, canonical_hash_hex, manifest, validate_and_hash,
-    CredActionRequest, CredEndpoint, CredPresentation, PresentedArtifact,
+    artifact_record, artifact_type, canonical_hash_hex, enforce_grant, manifest, validate_and_hash,
+    CredActionRequest, CredEndpoint, CredPermissionGrant, CredPresentation, GrantUsage,
+    PresentedArtifact,
 };
 use serde_json::Value;
 use std::fs;
@@ -29,6 +30,11 @@ enum Command {
     Record {
         #[command(subcommand)]
         command: RecordCommand,
+    },
+    /// Check an action request against a permission grant.
+    Grant {
+        #[command(subcommand)]
+        command: GrantCommand,
     },
     /// Build a mocked cred.presentation from a request and artifact.
     Present(PresentCommand),
@@ -57,6 +63,12 @@ struct ManifestCommand {
 enum RecordCommand {
     /// Build a cred.artifact_record for a JSON artifact.
     Add(RecordAddCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum GrantCommand {
+    /// Check whether a cred.action_request is allowed by a cred.permission_grant.
+    Check(GrantCheckCommand),
 }
 
 #[derive(Debug, Args)]
@@ -90,6 +102,18 @@ struct PresentCommand {
     disclosure: String,
 }
 
+#[derive(Debug, Args)]
+struct GrantCheckCommand {
+    #[arg(long)]
+    grant: PathBuf,
+    #[arg(long)]
+    request: PathBuf,
+    #[arg(long, default_value_t = 0)]
+    uses_so_far: u64,
+    #[arg(long)]
+    now: Option<u64>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -99,6 +123,9 @@ fn main() -> Result<()> {
         Command::Record {
             command: RecordCommand::Add(command),
         } => record_add(command),
+        Command::Grant {
+            command: GrantCommand::Check(command),
+        } => grant_check(command),
         Command::Present(command) => present(command),
     }
 }
@@ -115,6 +142,7 @@ fn print_manifest(command: ManifestCommand) -> Result<()> {
         now_unix()?,
         endpoints,
     );
+    artifact.validate()?;
     print_json(&artifact)
 }
 
@@ -163,16 +191,45 @@ fn record_add(command: RecordAddCommand) -> Result<()> {
         now_unix()?,
         labels,
     );
+    record.validate()?;
     print_json(&record)
+}
+
+fn grant_check(command: GrantCheckCommand) -> Result<()> {
+    let grant: CredPermissionGrant = serde_json::from_value(read_json(&command.grant)?)
+        .context("grant must be a cred.permission_grant artifact")?;
+    let request: CredActionRequest = serde_json::from_value(read_json(&command.request)?)
+        .context("request must be a cred.action_request artifact")?;
+    let now = match command.now {
+        Some(now) => now,
+        None => now_unix()?,
+    };
+
+    enforce_grant(
+        &grant,
+        &request,
+        GrantUsage {
+            now,
+            uses_so_far: command.uses_so_far,
+        },
+    )?;
+
+    let summary = serde_json::json!({
+        "contract_version": "sophia/v1",
+        "artifact_type": "cred.grant_check_result",
+        "allowed": true,
+        "grant_id": grant.grant_id,
+        "request_id": request.request_id,
+        "app_id": request.app_id
+    });
+    print_json(&summary)
 }
 
 fn present(command: PresentCommand) -> Result<()> {
     let request_value = read_json(&command.request)?;
     let request: CredActionRequest = serde_json::from_value(request_value)
         .context("request must be a cred.action_request artifact")?;
-    if request.contract_version != "sophia/v1" || request.artifact_type != "cred.action_request" {
-        anyhow::bail!("request must be a cred.action_request artifact");
-    }
+    request.validate()?;
 
     let artifact = read_json(&command.artifact)?;
     let artifact_type = artifact_type(&artifact)
@@ -203,6 +260,7 @@ fn present(command: PresentCommand) -> Result<()> {
         }],
         cred_signature: None,
     };
+    presentation.validate()?;
     print_json(&presentation)
 }
 

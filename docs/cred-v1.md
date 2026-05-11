@@ -39,6 +39,22 @@ include:
 
 Unknown capabilities must require explicit user approval before use.
 
+## Grant Enforcement
+
+A `cred.action_request` is allowed only when it matches a
+`cred.permission_grant`:
+
+- `app_id` must match.
+- `grant_id` must be present on the request and equal to the grant.
+- every action `kind` must appear in the grant's `capabilities`.
+- action `audience` values must appear in `constraints.allowed_audiences` when
+  that constraint is present.
+- action `artifact_type` values must appear in
+  `constraints.allowed_artifact_types` when that constraint is present.
+- expired grants and exhausted `max_uses` grants must be rejected.
+- export-style capabilities ending in `.export` require
+  `constraints.allow_export: true`.
+
 ## Disclosure Modes
 
 Presented artifacts use one of three disclosure modes:
