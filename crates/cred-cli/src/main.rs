@@ -1,10 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use cred_core::{
     artifact_record, artifact_type, canonical_hash_hex, enforce_grant, manifest, validate_and_hash,
     CredActionRequest, CredEndpoint, CredPermissionGrant, CredPresentation, GrantUsage,
     PresentedArtifact,
 };
+use cred_store::RecordStore;
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
@@ -14,6 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[command(name = "cred")]
 #[command(about = "Cred local proof agent")]
 struct Cli {
+    #[arg(long, global = true, env = "CRED_STORE_DIR")]
+    store: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -61,8 +64,12 @@ struct ManifestCommand {
 
 #[derive(Debug, Subcommand)]
 enum RecordCommand {
-    /// Build a cred.artifact_record for a JSON artifact.
+    /// Store a durable cred.artifact_record for a JSON artifact.
     Add(RecordAddCommand),
+    /// List stored cred.artifact_record metadata.
+    List,
+    /// Get one stored cred.artifact_record by ID.
+    Get(RecordGetCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -86,6 +93,11 @@ struct RecordAddCommand {
     source_app: Option<String>,
     #[arg(long = "label")]
     labels: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct RecordGetCommand {
+    record_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -115,14 +127,12 @@ struct GrantCheckCommand {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
+    let Cli { store, command } = Cli::parse();
+    match command {
         Command::Manifest(command) => print_manifest(command),
         Command::Inspect(path) => inspect(path.path),
         Command::Hash(path) => hash(path.path),
-        Command::Record {
-            command: RecordCommand::Add(command),
-        } => record_add(command),
+        Command::Record { command } => record(command, store),
         Command::Grant {
             command: GrantCommand::Check(command),
         } => grant_check(command),
@@ -169,7 +179,15 @@ fn hash(path: PathBuf) -> Result<()> {
     print_json(&summary)
 }
 
-fn record_add(command: RecordAddCommand) -> Result<()> {
+fn record(command: RecordCommand, store_path: Option<PathBuf>) -> Result<()> {
+    match command {
+        RecordCommand::Add(command) => record_add(command, store_path),
+        RecordCommand::List => record_list(store_path),
+        RecordCommand::Get(command) => record_get(command, store_path),
+    }
+}
+
+fn record_add(command: RecordAddCommand, store_path: Option<PathBuf>) -> Result<()> {
     let value = read_json(&command.artifact)?;
     let stored_artifact_type = artifact_type(&value)
         .context("artifact must include artifact_type")?
@@ -192,7 +210,34 @@ fn record_add(command: RecordAddCommand) -> Result<()> {
         labels,
     );
     record.validate()?;
+    record_store(store_path)?.append_record(&record)?;
     print_json(&record)
+}
+
+fn record_list(store_path: Option<PathBuf>) -> Result<()> {
+    let records = record_store(store_path)?.list_records()?;
+    let summary = serde_json::json!({
+        "contract_version": "sophia/v1",
+        "artifact_type": "cred.record_list",
+        "records": records
+    });
+    print_json(&summary)
+}
+
+fn record_get(command: RecordGetCommand, store_path: Option<PathBuf>) -> Result<()> {
+    let store = record_store(store_path)?;
+    let Some(record) = store.get_record(&command.record_id)? else {
+        bail!("record not found: {}", command.record_id);
+    };
+    print_json(&record)
+}
+
+fn record_store(store_path: Option<PathBuf>) -> Result<RecordStore> {
+    let root = match store_path {
+        Some(path) => path,
+        None => RecordStore::default_root()?,
+    };
+    Ok(RecordStore::new(root))
 }
 
 fn grant_check(command: GrantCheckCommand) -> Result<()> {

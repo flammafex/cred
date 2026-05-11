@@ -135,6 +135,7 @@ dependencies = [
  "anyhow",
  "clap",
  "cred-core",
+ "cred-store",
  "serde",
  "serde_json",
 ]
@@ -147,6 +148,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "cred-store"
+version = "0.1.0"
+dependencies = [
+ "cred-core",
+ "serde_json",
  "thiserror",
 ]
 

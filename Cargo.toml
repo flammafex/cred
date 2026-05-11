@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/cred-core",
+    "crates/cred-store",
     "crates/cred-cli",
 ]
 
@@ -14,6 +15,7 @@ description = "A local-first proof agent for holding, granting, and presenting p
 
 [workspace.dependencies]
 cred-core = { path = "crates/cred-core", version = "0.1.0" }
+cred-store = { path = "crates/cred-store", version = "0.1.0" }
 
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive", "env"] }

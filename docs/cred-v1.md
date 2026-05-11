@@ -70,4 +70,9 @@ Presented artifacts use one of three disclosure modes:
 privacy class, and custody class. It must not contain raw private keys,
 Matchlock private inputs, unspent Freebird tokens, or other secret material.
 
+The v1 local store writes records to `records.jsonl`, one validated
+`cred.artifact_record` per line. `record_id` values are unique within a store.
+The store is append-only metadata for now; raw artifact custody remains outside
+the durable record file.
+
 Schema: `contracts/schemas/cred-agent.schema.json`.

@@ -43,6 +43,7 @@ The schema lives at `contracts/schemas/cred-agent.schema.json`.
 | Path | Purpose |
 | --- | --- |
 | `crates/cred-core` | Cred v1 artifact types, validation, canonical JSON, and SHA-256 hashing. |
+| `crates/cred-store` | Durable local JSONL store for `cred.artifact_record` metadata. |
 | `crates/cred-cli` | `cred` command-line interface. |
 | `contracts/` | Standalone Cred contract files. |
 | `docs/` | Human-readable protocol notes. |
@@ -59,9 +60,13 @@ cargo run -p cred-cli -- manifest \
 
 cargo run -p cred-cli -- inspect examples/manifest.json
 cargo run -p cred-cli -- hash examples/action-request.json
-cargo run -p cred-cli -- record add examples/presentation.json \
+cargo run -p cred-cli -- --store ./tmp/cred-store record add examples/presentation.json \
   --record-id record-presentation-1 \
   --cred-id cred:local:example
+cargo run -p cred-cli -- --store ./tmp/cred-store record list
+cargo run -p cred-cli -- --store ./tmp/cred-store record get record-presentation-1
+
+# If --store is omitted, Cred uses CRED_STORE_DIR or $HOME/.local/share/cred.
 
 cargo run -p cred-cli -- grant check \
   --grant examples/permission-grant.json \
@@ -90,7 +95,7 @@ The first implementation is deliberately small:
 
 1. Create a `cred.manifest`.
 2. Validate and hash Cred JSON artifacts.
-3. Build `cred.artifact_record` metadata.
+3. Store durable `cred.artifact_record` metadata.
 4. Accept a `cred.action_request` file.
 5. Enforce `cred.permission_grant` constraints for an action request.
 6. Return a mocked `cred.presentation` for embedded or referenced artifacts.
