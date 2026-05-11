@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://metacan.org/contracts/sophia/v1/cred-agent.schema.json",
+  "title": "Sophia v1 Cred Agent Artifacts",
+  "oneOf": [
+    { "$ref": "#/$defs/manifest" },
+    { "$ref": "#/$defs/permissionGrant" },
+    { "$ref": "#/$defs/actionRequest" },
+    { "$ref": "#/$defs/presentation" },
+    { "$ref": "#/$defs/artifactRecord" }
+  ],
+  "$defs": {
+    "contractVersion": {
+      "const": "sophia/v1"
+    },
+    "hexSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "hexPublicKey": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "hexSignature": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{128}$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capability": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$"
+    },
+    "artifactBase": {
+      "type": "object",
+      "required": ["contract_version", "artifact_type"],
+      "properties": {
+        "contract_version": { "$ref": "#/$defs/contractVersion" },
+        "artifact_type": { "type": "string" }
+      }
+    },
+    "controller": {
+      "type": "object",
+      "required": ["scheme", "public_key"],
+      "properties": {
+        "scheme": { "const": "ed25519" },
+        "public_key": { "$ref": "#/$defs/hexPublicKey" }
+      },
+      "additionalProperties": false
+    },
+    "signature": {
+      "type": "object",
+      "required": ["scheme", "public_key", "signature"],
+      "properties": {
+        "scheme": { "const": "ed25519" },
+        "public_key": { "$ref": "#/$defs/hexPublicKey" },
+        "signature": { "$ref": "#/$defs/hexSignature" }
+      },
+      "additionalProperties": false
+    },
+    "endpoint": {
+      "type": "object",
+      "required": ["transport"],
+      "properties": {
+        "transport": { "enum": ["stdio", "http", "unix", "websocket"] },
+        "uri": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "credStorage": {
+      "type": "object",
+      "required": ["encrypted_at_rest", "exportable"],
+      "properties": {
+        "encrypted_at_rest": { "type": "boolean" },
+        "exportable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "grantConstraints": {
+      "type": "object",
+      "properties": {
+        "allowed_audiences": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "allowed_artifact_types": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "max_uses": { "type": "integer", "minimum": 1 },
+        "expires_at": { "type": "integer", "minimum": 0 },
+        "allow_export": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "credAction": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/capability" },
+        "audience": { "type": "string", "minLength": 1 },
+        "semantic": {
+          "enum": ["consuming_verify", "non_consuming_check", "not_used"]
+        },
+        "artifact_type": { "type": "string", "minLength": 1 },
+        "hash": { "$ref": "#/$defs/hexSha256" },
+        "payload_hash": { "$ref": "#/$defs/hexSha256" },
+        "pool_id": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "presentedArtifact": {
+      "type": "object",
+      "required": ["artifact_type", "artifact_hash", "disclosure"],
+      "properties": {
+        "artifact_type": { "type": "string", "minLength": 1 },
+        "artifact_hash": { "$ref": "#/$defs/hexSha256" },
+        "record_id": { "$ref": "#/$defs/id" },
+        "disclosure": { "enum": ["embedded", "reference", "redacted"] },
+        "artifact": true
+      },
+      "additionalProperties": false
+    },
+    "manifest": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactBase" },
+        {
+          "type": "object",
+          "required": ["artifact_type", "cred_id", "controller", "capabilities", "storage", "created_at"],
+          "properties": {
+            "contract_version": { "$ref": "#/$defs/contractVersion" },
+            "artifact_type": { "const": "cred.manifest" },
+            "cred_id": { "$ref": "#/$defs/id" },
+            "controller": { "$ref": "#/$defs/controller" },
+            "capabilities": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/capability" },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "storage": { "$ref": "#/$defs/credStorage" },
+            "created_at": { "type": "integer", "minimum": 0 },
+            "endpoints": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/endpoint" }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "permissionGrant": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactBase" },
+        {
+          "type": "object",
+          "required": ["artifact_type", "grant_id", "cred_id", "app_id", "capabilities", "constraints", "human_approval", "created_at"],
+          "properties": {
+            "contract_version": { "$ref": "#/$defs/contractVersion" },
+            "artifact_type": { "const": "cred.permission_grant" },
+            "grant_id": { "$ref": "#/$defs/id" },
+            "cred_id": { "$ref": "#/$defs/id" },
+            "app_id": { "$ref": "#/$defs/id" },
+            "app_pubkey": { "$ref": "#/$defs/hexPublicKey" },
+            "capabilities": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/capability" },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "constraints": { "$ref": "#/$defs/grantConstraints" },
+            "human_approval": { "enum": ["per_use", "once", "none"] },
+            "created_at": { "type": "integer", "minimum": 0 },
+            "cred_signature": { "$ref": "#/$defs/signature" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "actionRequest": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactBase" },
+        {
+          "type": "object",
+          "required": ["artifact_type", "request_id", "app_id", "requested_at", "actions"],
+          "properties": {
+            "contract_version": { "$ref": "#/$defs/contractVersion" },
+            "artifact_type": { "const": "cred.action_request" },
+            "request_id": { "$ref": "#/$defs/id" },
+            "app_id": { "$ref": "#/$defs/id" },
+            "grant_id": { "$ref": "#/$defs/id" },
+            "requested_at": { "type": "integer", "minimum": 0 },
+            "purpose": { "type": "string", "minLength": 1 },
+            "actions": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/credAction" },
+              "minItems": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "presentation": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactBase" },
+        {
+          "type": "object",
+          "required": ["artifact_type", "presentation_id", "cred_id", "request_id", "app_id", "created_at", "artifacts"],
+          "properties": {
+            "contract_version": { "$ref": "#/$defs/contractVersion" },
+            "artifact_type": { "const": "cred.presentation" },
+            "presentation_id": { "$ref": "#/$defs/id" },
+            "cred_id": { "$ref": "#/$defs/id" },
+            "request_id": { "$ref": "#/$defs/id" },
+            "grant_id": { "$ref": "#/$defs/id" },
+            "app_id": { "$ref": "#/$defs/id" },
+            "created_at": { "type": "integer", "minimum": 0 },
+            "artifacts": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/presentedArtifact" },
+              "minItems": 1
+            },
+            "cred_signature": { "$ref": "#/$defs/signature" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "artifactRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/artifactBase" },
+        {
+          "type": "object",
+          "required": ["artifact_type", "record_id", "cred_id", "stored_artifact_type", "artifact_hash", "privacy", "custody", "created_at"],
+          "properties": {
+            "contract_version": { "$ref": "#/$defs/contractVersion" },
+            "artifact_type": { "const": "cred.artifact_record" },
+            "record_id": { "$ref": "#/$defs/id" },
+            "cred_id": { "$ref": "#/$defs/id" },
+            "stored_artifact_type": { "type": "string", "minLength": 1 },
+            "artifact_hash": { "$ref": "#/$defs/hexSha256" },
+            "subject_hash": { "$ref": "#/$defs/hexSha256" },
+            "privacy": { "enum": ["public", "selective", "private", "secret"] },
+            "custody": { "enum": ["local_encrypted", "external_reference", "ephemeral", "secret_derived"] },
+            "source_app": { "$ref": "#/$defs/id" },
+            "created_at": { "type": "integer", "minimum": 0 },
+            "labels": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

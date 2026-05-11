@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cred-core",
+    "crates/cred-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+readme = "README.md"
+description = "A local-first proof agent for holding, granting, and presenting portable proofs"
+
+[workspace.dependencies]
+cred-core = { path = "crates/cred-core", version = "0.1.0" }
+
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive", "env"] }
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "1.0"

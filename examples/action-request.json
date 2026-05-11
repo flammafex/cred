@@ -1,0 +1,20 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "cred.action_request",
+  "request_id": "request-vote-1",
+  "app_id": "app:prestige:local",
+  "grant_id": "grant-prestige-1",
+  "requested_at": 1767225601,
+  "purpose": "cast vote",
+  "actions": [
+    {
+      "kind": "freebird.present",
+      "audience": "prestige",
+      "semantic": "consuming_verify"
+    },
+    {
+      "kind": "witness.timestamp",
+      "hash": "f2ca1bb6c7e907d06dafe4687e579fce7d08f0f2514ee1f2787e118c67d84fbf"
+    }
+  ]
+}

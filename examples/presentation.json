@@ -1,0 +1,22 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "cred.presentation",
+  "presentation_id": "presentation-prestige-1",
+  "cred_id": "cred:local:example",
+  "request_id": "request-vote-1",
+  "grant_id": "grant-prestige-1",
+  "app_id": "app:prestige:local",
+  "created_at": 1767225602,
+  "artifacts": [
+    {
+      "artifact_type": "freebird.verify_request",
+      "artifact_hash": "dfd3f3fe66c16b95124e9e10c15a7c9321ed3b75d0d79dc0d2e2b47dcbbdc507",
+      "disclosure": "embedded",
+      "artifact": {
+        "contract_version": "sophia/v1",
+        "artifact_type": "freebird.verify_request",
+        "token_b64": "AQIDBAUGBwgJCgsMDQ4PEA"
+      }
+    }
+  ]
+}

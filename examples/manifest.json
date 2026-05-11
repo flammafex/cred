@@ -1,0 +1,27 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "cred.manifest",
+  "cred_id": "cred:local:example",
+  "controller": {
+    "scheme": "ed25519",
+    "public_key": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "capabilities": [
+    "freebird.present",
+    "witness.timestamp",
+    "witness.present_attestation",
+    "matchlock.derive_commitment",
+    "sign.payload",
+    "store.artifact"
+  ],
+  "storage": {
+    "encrypted_at_rest": true,
+    "exportable": true
+  },
+  "created_at": 1767225600,
+  "endpoints": [
+    {
+      "transport": "stdio"
+    }
+  ]
+}
