@@ -55,6 +55,11 @@ A `cred.action_request` is allowed only when it matches a
 - export-style capabilities ending in `.export` require
   `constraints.allow_export: true`.
 
+When Cred produces a presentation with a grant, the presented artifact type is
+also checked against `constraints.allowed_artifact_types` when that constraint
+is present. If the request itself names `action.artifact_type`, the presentation
+must use one of those requested artifact types.
+
 ## Disclosure Modes
 
 Presented artifacts use one of three disclosure modes:
