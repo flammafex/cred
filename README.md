@@ -56,7 +56,8 @@ cargo run -p cred-cli -- manifest \
   --cred-id cred:local:example \
   --controller-public-key 1111111111111111111111111111111111111111111111111111111111111111 \
   --capability freebird.present \
-  --capability witness.timestamp
+  --capability witness.timestamp \
+  --capability matchlock.present_artifact
 
 cargo run -p cred-cli -- inspect examples/manifest.json
 cargo run -p cred-cli -- hash examples/action-request.json
@@ -93,6 +94,17 @@ cargo run -p cred-cli -- --store ./tmp/cred-store freebird present-check \
   --cred-id cred:local:example \
   --signing-key ./tmp/cred-store/controller_sk.hex
 
+cargo run -p cred-cli -- --store ./tmp/cred-store matchlock import-artifact examples/matchlock-commitment.json \
+  --record-id record-matchlock-commitment-1 \
+  --cred-id cred:local:example
+cargo run -p cred-cli -- --store ./tmp/cred-store matchlock present-artifact \
+  --request examples/matchlock-presentation-request.json \
+  --grant examples/matchlock-permission-grant.json \
+  --record-id record-matchlock-commitment-1 \
+  --presentation-id presentation-matchlock-1 \
+  --cred-id cred:local:example \
+  --signing-key ./tmp/cred-store/controller_sk.hex
+
 cargo run -p cred-cli -- present \
   --request examples/action-request.json \
   --artifact examples/manifest.json \
@@ -105,6 +117,7 @@ Witness adapter smoke:
 ```bash
 ./scripts/witness-adapter-smoke.sh
 ./scripts/freebird-adapter-smoke.sh
+./scripts/matchlock-adapter-smoke.sh
 ```
 
 ## Non-Goals

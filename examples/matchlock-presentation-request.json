@@ -1,0 +1,18 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "cred.action_request",
+  "request_id": "request-matchlock-1",
+  "app_id": "app:rendezvous:local",
+  "grant_id": "grant-matchlock-1",
+  "requested_at": 1767225600,
+  "purpose": "Present a Matchlock commitment without revealing the raw match token.",
+  "actions": [
+    {
+      "kind": "matchlock.present_artifact",
+      "audience": "rendezvous",
+      "artifact_type": "matchlock.commitment",
+      "pool_id": "test-pool",
+      "reason": "prove commitment custody"
+    }
+  ]
+}

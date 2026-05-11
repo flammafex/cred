@@ -50,6 +50,11 @@ enum Command {
         #[command(subcommand)]
         command: FreebirdCommand,
     },
+    /// Work with presentation-safe Matchlock artifacts through Cred.
+    Matchlock {
+        #[command(subcommand)]
+        command: MatchlockCommand,
+    },
     /// Build Cred artifacts from existing JSON.
     Record {
         #[command(subcommand)]
@@ -121,6 +126,14 @@ enum FreebirdCommand {
     ImportCheck(FreebirdImportCheckCommand),
     /// Present an imported non-consuming Freebird check request by reference.
     PresentCheck(FreebirdPresentCheckCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum MatchlockCommand {
+    /// Import a presentation-safe Matchlock artifact into Cred records.
+    ImportArtifact(MatchlockImportArtifactCommand),
+    /// Present an imported Matchlock artifact by reference.
+    PresentArtifact(MatchlockPresentArtifactCommand),
 }
 
 #[derive(Debug, Args)]
@@ -237,6 +250,47 @@ struct FreebirdPresentCheckCommand {
 }
 
 #[derive(Debug, Args)]
+struct MatchlockImportArtifactCommand {
+    artifact: PathBuf,
+    #[arg(long)]
+    record_id: String,
+    #[arg(long)]
+    cred_id: String,
+    #[arg(long, default_value = "private")]
+    privacy: String,
+    #[arg(long, default_value = "external_reference")]
+    custody: String,
+    #[arg(long)]
+    artifact_uri: Option<String>,
+    #[arg(long, default_value = "app:matchlock")]
+    source_app: String,
+    #[arg(long = "label")]
+    labels: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct MatchlockPresentArtifactCommand {
+    #[arg(long)]
+    request: PathBuf,
+    #[arg(long)]
+    record_id: String,
+    #[arg(long)]
+    grant: Option<PathBuf>,
+    #[arg(long, env = "CRED_CONTROLLER_SK")]
+    signing_key: Option<PathBuf>,
+    #[arg(long, default_value_t = 0)]
+    uses_so_far: u64,
+    #[arg(long)]
+    now: Option<u64>,
+    #[arg(long)]
+    presentation_id: String,
+    #[arg(long)]
+    cred_id: String,
+    #[arg(long)]
+    disclosure: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct RecordGetCommand {
     record_id: String,
 }
@@ -287,6 +341,7 @@ fn main() -> Result<()> {
         Command::Key { command } => key(command, store),
         Command::Witness { command } => witness(command, store),
         Command::Freebird { command } => freebird(command, store),
+        Command::Matchlock { command } => matchlock(command, store),
         Command::Record { command } => record(command, store),
         Command::Grant {
             command: GrantCommand::Check(command),
@@ -583,6 +638,276 @@ fn ensure_freebird_check_request(value: &Value) -> Result<()> {
 
 fn is_base64url_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+}
+
+fn matchlock(command: MatchlockCommand, store_path: Option<PathBuf>) -> Result<()> {
+    match command {
+        MatchlockCommand::ImportArtifact(command) => matchlock_import_artifact(command, store_path),
+        MatchlockCommand::PresentArtifact(command) => {
+            matchlock_present_artifact(command, store_path)
+        }
+    }
+}
+
+fn matchlock_import_artifact(
+    command: MatchlockImportArtifactCommand,
+    store_path: Option<PathBuf>,
+) -> Result<()> {
+    let value = read_json(&command.artifact)?;
+    ensure_matchlock_presentation_safe_artifact(&value)?;
+    let stored_artifact_type = artifact_type(&value)?.to_owned();
+    let artifact_hash = canonical_hash_hex(&value)?;
+    let artifact_uri = command.artifact_uri.or_else(|| {
+        if command.custody == "external_reference" {
+            Some(command.artifact.display().to_string())
+        } else {
+            None
+        }
+    });
+    let mut labels = command.labels;
+    if !labels.iter().any(|label| label == "matchlock") {
+        labels.push("matchlock".to_owned());
+    }
+    let record = artifact_record(
+        command.record_id,
+        command.cred_id,
+        stored_artifact_type,
+        artifact_hash,
+        artifact_uri,
+        command.privacy,
+        command.custody,
+        Some(command.source_app),
+        now_unix()?,
+        Some(labels),
+    );
+    store_record(record, store_path)
+}
+
+fn matchlock_present_artifact(
+    command: MatchlockPresentArtifactCommand,
+    store_path: Option<PathBuf>,
+) -> Result<()> {
+    let store = record_store(store_path.clone())?;
+    let Some(record) = store.get_record(&command.record_id)? else {
+        bail!("record not found: {}", command.record_id);
+    };
+    ensure_matchlock_safe_artifact_type(&record.stored_artifact_type)?;
+
+    present(
+        PresentCommand {
+            request: command.request,
+            artifact: None,
+            record_id: Some(command.record_id),
+            grant: command.grant,
+            signing_key: command.signing_key,
+            uses_so_far: command.uses_so_far,
+            now: command.now,
+            presentation_id: command.presentation_id,
+            cred_id: command.cred_id,
+            disclosure: command.disclosure.or_else(|| Some("reference".to_owned())),
+        },
+        store_path,
+    )
+}
+
+fn ensure_matchlock_presentation_safe_artifact(value: &Value) -> Result<()> {
+    let object = value
+        .as_object()
+        .context("Matchlock artifact must be a JSON object")?;
+    ensure!(
+        object.get("contract_version").and_then(Value::as_str) == Some("sophia/v1"),
+        "Matchlock artifact contract_version must be sophia/v1"
+    );
+    let artifact_type = object
+        .get("artifact_type")
+        .and_then(Value::as_str)
+        .context("Matchlock artifact missing artifact_type")?;
+    ensure_matchlock_safe_artifact_type(artifact_type)?;
+
+    match artifact_type {
+        "matchlock.participant_public_key" => {
+            ensure_only_fields(
+                object,
+                &[
+                    "contract_version",
+                    "artifact_type",
+                    "pool_id",
+                    "participant_public_key",
+                    "signing_public_key",
+                ],
+            )?;
+            ensure_non_empty_string_field(object, "pool_id")?;
+            ensure_lower_hex_field(object, "participant_public_key", 32)?;
+            ensure_optional_lower_hex_field(object, "signing_public_key", 32)?;
+        }
+        "matchlock.commitment" => {
+            ensure_only_fields(
+                object,
+                &[
+                    "contract_version",
+                    "artifact_type",
+                    "pool_id",
+                    "commitment",
+                    "hashes_raw_token_bytes",
+                ],
+            )?;
+            ensure_non_empty_string_field(object, "pool_id")?;
+            ensure_lower_hex_field(object, "commitment", 32)?;
+            if let Some(value) = object.get("hashes_raw_token_bytes") {
+                ensure!(
+                    value.as_bool() == Some(true),
+                    "matchlock.commitment hashes_raw_token_bytes must be true"
+                );
+            }
+        }
+        "matchlock.nullifier" => {
+            ensure_only_fields(
+                object,
+                &[
+                    "contract_version",
+                    "artifact_type",
+                    "pool_id",
+                    "nullifier",
+                    "domain",
+                ],
+            )?;
+            ensure_non_empty_string_field(object, "pool_id")?;
+            ensure_lower_hex_field(object, "nullifier", 32)?;
+            ensure_optional_const_string_field(object, "domain", "matchlock-nullifier-v1")?;
+        }
+        "matchlock.psi_setup"
+        | "matchlock.psi_request"
+        | "matchlock.psi_response"
+        | "matchlock.encrypted_owner_key" => {
+            ensure_only_fields(
+                object,
+                &[
+                    "contract_version",
+                    "artifact_type",
+                    "pool_id",
+                    "payload_b64",
+                    "owner_public_key",
+                    "signature",
+                ],
+            )?;
+            ensure_non_empty_string_field(object, "pool_id")?;
+            ensure_base64_field(object, "payload_b64")?;
+            ensure_optional_lower_hex_field(object, "owner_public_key", 32)?;
+            ensure_optional_lower_hex_field(object, "signature", 64)?;
+        }
+        _ => unreachable!("artifact type already checked"),
+    }
+
+    Ok(())
+}
+
+fn ensure_matchlock_safe_artifact_type(artifact_type: &str) -> Result<()> {
+    match artifact_type {
+        "matchlock.participant_public_key"
+        | "matchlock.commitment"
+        | "matchlock.nullifier"
+        | "matchlock.psi_setup"
+        | "matchlock.psi_request"
+        | "matchlock.psi_response"
+        | "matchlock.encrypted_owner_key" => Ok(()),
+        "matchlock.match_token" => {
+            bail!("Cred Matchlock adapter rejects raw matchlock.match_token durable records; import a commitment, nullifier, public key, or PSI envelope instead")
+        }
+        other => bail!("unsupported presentation-safe Matchlock artifact_type: {other}"),
+    }
+}
+
+fn ensure_only_fields(
+    object: &serde_json::Map<String, Value>,
+    allowed_fields: &[&str],
+) -> Result<()> {
+    for field in object.keys() {
+        ensure!(
+            allowed_fields.iter().any(|allowed| allowed == field),
+            "unexpected Matchlock artifact field: {field}"
+        );
+    }
+    Ok(())
+}
+
+fn string_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    field: &'static str,
+) -> Result<&'a str> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .with_context(|| format!("Matchlock artifact missing or invalid {field}"))
+}
+
+fn ensure_non_empty_string_field(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+) -> Result<()> {
+    ensure!(
+        !string_field(object, field)?.is_empty(),
+        "Matchlock artifact {field} must be non-empty"
+    );
+    Ok(())
+}
+
+fn ensure_optional_const_string_field(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+    expected: &'static str,
+) -> Result<()> {
+    if let Some(value) = object.get(field) {
+        ensure!(
+            value.as_str() == Some(expected),
+            "Matchlock artifact {field} must be {expected}"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_lower_hex_field(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+    expected_bytes: usize,
+) -> Result<()> {
+    ensure_lower_hex_value(string_field(object, field)?, field, expected_bytes)
+}
+
+fn ensure_optional_lower_hex_field(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+    expected_bytes: usize,
+) -> Result<()> {
+    if let Some(value) = object.get(field) {
+        let value = value
+            .as_str()
+            .with_context(|| format!("Matchlock artifact {field} must be a string"))?;
+        ensure_lower_hex_value(value, field, expected_bytes)?;
+    }
+    Ok(())
+}
+
+fn ensure_lower_hex_value(value: &str, field: &'static str, expected_bytes: usize) -> Result<()> {
+    ensure!(
+        value.len() == expected_bytes * 2
+            && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && !value.bytes().any(|byte| byte.is_ascii_uppercase()),
+        "Matchlock artifact {field} must be lowercase hex for exactly {expected_bytes} bytes"
+    );
+    Ok(())
+}
+
+fn ensure_base64_field(object: &serde_json::Map<String, Value>, field: &'static str) -> Result<()> {
+    let value = string_field(object, field)?;
+    ensure!(
+        !value.is_empty() && value.bytes().all(is_base64_byte),
+        "Matchlock artifact {field} must be non-empty base64"
+    );
+    Ok(())
+}
+
+fn is_base64_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/' || byte == b'='
 }
 
 fn record(command: RecordCommand, store_path: Option<PathBuf>) -> Result<()> {
@@ -1071,6 +1396,43 @@ mod tests {
             .contains("token_b64 must be non-empty base64url"));
     }
 
+    #[test]
+    fn matchlock_adapter_accepts_commitment() {
+        ensure_matchlock_presentation_safe_artifact(&sample_matchlock_commitment()).unwrap();
+    }
+
+    #[test]
+    fn matchlock_adapter_rejects_raw_match_token() {
+        let err = ensure_matchlock_presentation_safe_artifact(&serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "matchlock.match_token",
+            "pool_id": "test-pool",
+            "domain": "matchlock-match-v1",
+            "token": "bbfee0cd9a72d348a1a4dafee9ad8c055f02c79e0d341ff4aa425583030492bf"
+        }))
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("rejects raw matchlock.match_token durable records"));
+    }
+
+    #[test]
+    fn matchlock_adapter_rejects_private_artifact_fields() {
+        let err = ensure_matchlock_presentation_safe_artifact(&serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "matchlock.commitment",
+            "pool_id": "test-pool",
+            "commitment": "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925",
+            "private_key": "77076d0a7318a57d3c16c17251b26645c6c2f6929f0a4b5745a0435c9b7bd30d"
+        }))
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("unexpected Matchlock artifact field"));
+    }
+
     fn sample_witness_attestation() -> Value {
         serde_json::json!({
             "contract_version": "sophia/v1",
@@ -1095,6 +1457,16 @@ mod tests {
             "contract_version": "sophia/v1",
             "artifact_type": "freebird.check_request",
             "token_b64": "AQIDBAUGBwgJCgsMDQ4PEA"
+        })
+    }
+
+    fn sample_matchlock_commitment() -> Value {
+        serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "matchlock.commitment",
+            "pool_id": "test-pool",
+            "commitment": "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925",
+            "hashes_raw_token_bytes": true
         })
     }
 

@@ -1,0 +1,7 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "matchlock.nullifier",
+  "pool_id": "test-pool",
+  "nullifier": "9728a87b7ef7fb92a1438c557b5621c0c2f7c67e1d9847e8f6e31dd6e8e05d0c",
+  "domain": "matchlock-nullifier-v1"
+}

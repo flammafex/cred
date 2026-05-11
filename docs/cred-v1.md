@@ -39,6 +39,7 @@ include:
 - `witness.timestamp`
 - `witness.present_attestation`
 - `matchlock.derive_commitment`
+- `matchlock.present_artifact`
 - `matchlock.present_nullifier`
 - `hypertoken.session`
 - `sign.payload`
@@ -74,6 +75,23 @@ The Cred CLI exposes a named non-consuming Freebird adapter:
 Cred does not own consuming Freebird token flows. The Freebird adapter rejects
 `freebird.verify_request` artifacts and does not call `/v1/verify`; consuming
 verification remains an app or verifier responsibility.
+
+## Matchlock Adapter
+
+The Cred CLI exposes a named Matchlock adapter for presentation-safe artifacts:
+
+- `cred matchlock import-artifact` accepts `sophia/v1`
+  `matchlock.participant_public_key`, `matchlock.commitment`,
+  `matchlock.nullifier`, and opaque PSI envelope artifacts, then writes a slim
+  `cred.artifact_record`.
+- `cred matchlock present-artifact` presents an imported Matchlock artifact by
+  reference, optionally gated by a `cred.permission_grant` and signed with the
+  controller key.
+
+The adapter rejects raw `matchlock.match_token` durable records. Match tokens
+encode private selection state; Cred should present commitments, nullifiers,
+public keys, or opaque PSI envelopes instead of placing raw tokens in durable
+records.
 
 ## Grant Enforcement
 

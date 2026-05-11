@@ -11,6 +11,7 @@
     "witness.timestamp",
     "witness.present_attestation",
     "matchlock.derive_commitment",
+    "matchlock.present_artifact",
     "sign.payload",
     "store.artifact"
   ],

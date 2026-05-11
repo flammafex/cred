@@ -1,0 +1,7 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "matchlock.match_token",
+  "pool_id": "test-pool",
+  "token": "bbfee0cd9a72d348a1a4dafee9ad8c055f02c79e0d341ff4aa425583030492bf",
+  "domain": "matchlock-match-v1"
+}
