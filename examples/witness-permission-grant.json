@@ -1,0 +1,23 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "cred.permission_grant",
+  "grant_id": "grant-witness-attestation-1",
+  "cred_id": "cred:local:example",
+  "app_id": "app:prestige:local",
+  "capabilities": [
+    "witness.present_attestation"
+  ],
+  "constraints": {
+    "allowed_audiences": [
+      "prestige"
+    ],
+    "allowed_artifact_types": [
+      "witness.signed_attestation"
+    ],
+    "max_uses": 3,
+    "expires_at": 4102444800,
+    "allow_export": false
+  },
+  "human_approval": "per_use",
+  "created_at": 1767225600
+}

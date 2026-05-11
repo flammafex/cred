@@ -40,6 +40,11 @@ enum Command {
         #[command(subcommand)]
         command: KeyCommand,
     },
+    /// Work with Witness artifacts through Cred.
+    Witness {
+        #[command(subcommand)]
+        command: WitnessCommand,
+    },
     /// Build Cred artifacts from existing JSON.
     Record {
         #[command(subcommand)]
@@ -97,6 +102,14 @@ enum KeyCommand {
     Public(KeyPathCommand),
 }
 
+#[derive(Debug, Subcommand)]
+enum WitnessCommand {
+    /// Import a witness.signed_attestation into Cred records.
+    Import(WitnessImportCommand),
+    /// Present an imported Witness attestation by reference.
+    Present(WitnessPresentCommand),
+}
+
 #[derive(Debug, Args)]
 struct KeyGenerateCommand {
     #[arg(long, env = "CRED_CONTROLLER_SK")]
@@ -126,6 +139,47 @@ struct RecordAddCommand {
     source_app: Option<String>,
     #[arg(long = "label")]
     labels: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct WitnessImportCommand {
+    attestation: PathBuf,
+    #[arg(long)]
+    record_id: String,
+    #[arg(long)]
+    cred_id: String,
+    #[arg(long, default_value = "selective")]
+    privacy: String,
+    #[arg(long, default_value = "external_reference")]
+    custody: String,
+    #[arg(long)]
+    artifact_uri: Option<String>,
+    #[arg(long, default_value = "app:witness")]
+    source_app: String,
+    #[arg(long = "label")]
+    labels: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct WitnessPresentCommand {
+    #[arg(long)]
+    request: PathBuf,
+    #[arg(long)]
+    record_id: String,
+    #[arg(long)]
+    grant: Option<PathBuf>,
+    #[arg(long, env = "CRED_CONTROLLER_SK")]
+    signing_key: Option<PathBuf>,
+    #[arg(long, default_value_t = 0)]
+    uses_so_far: u64,
+    #[arg(long)]
+    now: Option<u64>,
+    #[arg(long)]
+    presentation_id: String,
+    #[arg(long)]
+    cred_id: String,
+    #[arg(long)]
+    disclosure: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -177,6 +231,7 @@ fn main() -> Result<()> {
         Command::Hash(path) => hash(path.path),
         Command::Verify(path) => verify(path.path),
         Command::Key { command } => key(command, store),
+        Command::Witness { command } => witness(command, store),
         Command::Record { command } => record(command, store),
         Command::Grant {
             command: GrantCommand::Check(command),
@@ -282,6 +337,94 @@ fn key_public(command: KeyPathCommand, store_path: Option<PathBuf>) -> Result<()
     print_json(&summary)
 }
 
+fn witness(command: WitnessCommand, store_path: Option<PathBuf>) -> Result<()> {
+    match command {
+        WitnessCommand::Import(command) => witness_import(command, store_path),
+        WitnessCommand::Present(command) => witness_present(command, store_path),
+    }
+}
+
+fn witness_import(command: WitnessImportCommand, store_path: Option<PathBuf>) -> Result<()> {
+    let value = read_json(&command.attestation)?;
+    ensure_witness_signed_attestation(&value)?;
+    let artifact_hash = canonical_hash_hex(&value)?;
+    let artifact_uri = command.artifact_uri.or_else(|| {
+        if command.custody == "external_reference" {
+            Some(command.attestation.display().to_string())
+        } else {
+            None
+        }
+    });
+    let mut labels = command.labels;
+    if !labels.iter().any(|label| label == "witness") {
+        labels.push("witness".to_owned());
+    }
+    let record = artifact_record(
+        command.record_id,
+        command.cred_id,
+        "witness.signed_attestation".to_owned(),
+        artifact_hash,
+        artifact_uri,
+        command.privacy,
+        command.custody,
+        Some(command.source_app),
+        now_unix()?,
+        Some(labels),
+    );
+    store_record(record, store_path)
+}
+
+fn witness_present(command: WitnessPresentCommand, store_path: Option<PathBuf>) -> Result<()> {
+    let store = record_store(store_path.clone())?;
+    let Some(record) = store.get_record(&command.record_id)? else {
+        bail!("record not found: {}", command.record_id);
+    };
+    ensure!(
+        record.stored_artifact_type == "witness.signed_attestation",
+        "record is not a witness.signed_attestation: {}",
+        record.stored_artifact_type
+    );
+
+    present(
+        PresentCommand {
+            request: command.request,
+            artifact: None,
+            record_id: Some(command.record_id),
+            grant: command.grant,
+            signing_key: command.signing_key,
+            uses_so_far: command.uses_so_far,
+            now: command.now,
+            presentation_id: command.presentation_id,
+            cred_id: command.cred_id,
+            disclosure: command.disclosure.or_else(|| Some("reference".to_owned())),
+        },
+        store_path,
+    )
+}
+
+fn ensure_witness_signed_attestation(value: &Value) -> Result<()> {
+    let object = value
+        .as_object()
+        .context("witness attestation must be a JSON object")?;
+    ensure!(
+        object.get("contract_version").and_then(Value::as_str) == Some("sophia/v1"),
+        "witness attestation contract_version must be sophia/v1"
+    );
+    ensure!(
+        object.get("artifact_type").and_then(Value::as_str) == Some("witness.signed_attestation"),
+        "expected artifact_type witness.signed_attestation"
+    );
+    ensure!(
+        object.get("attestation").is_some(),
+        "witness.signed_attestation missing attestation"
+    );
+    ensure!(
+        object.get("signatures").is_some(),
+        "witness.signed_attestation missing signatures"
+    );
+    Ok(())
+}
+
 fn record(command: RecordCommand, store_path: Option<PathBuf>) -> Result<()> {
     match command {
         RecordCommand::Add(command) => record_add(command, store_path),
@@ -320,6 +463,10 @@ fn record_add(command: RecordAddCommand, store_path: Option<PathBuf>) -> Result<
         now_unix()?,
         labels,
     );
+    store_record(record, store_path)
+}
+
+fn store_record(record: cred_core::CredArtifactRecord, store_path: Option<PathBuf>) -> Result<()> {
     record.validate()?;
     record_store(store_path)?.append_record(&record)?;
     print_json(&record)
@@ -695,6 +842,59 @@ mod tests {
         assert!(err
             .to_string()
             .contains("request does not allow presented artifact type"));
+    }
+
+    #[test]
+    fn witness_adapter_accepts_signed_attestation() {
+        ensure_witness_signed_attestation(&sample_witness_attestation()).unwrap();
+    }
+
+    #[test]
+    fn witness_adapter_rejects_other_artifacts() {
+        let err = ensure_witness_signed_attestation(&serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "cred.presentation",
+            "attestation": {},
+            "signatures": {}
+        }))
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("expected artifact_type witness.signed_attestation"));
+    }
+
+    #[test]
+    fn witness_adapter_rejects_incomplete_attestation() {
+        let err = ensure_witness_signed_attestation(&serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "witness.signed_attestation",
+            "attestation": {}
+        }))
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("witness.signed_attestation missing signatures"));
+    }
+
+    fn sample_witness_attestation() -> Value {
+        serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "witness.signed_attestation",
+            "attestation": {
+                "tree_size": 1
+            },
+            "signatures": {
+                "kind": "multisig",
+                "signatures": [
+                    {
+                        "witness_id": "witness:local:1",
+                        "signature": "11"
+                    }
+                ]
+            }
+        })
     }
 
     fn sample_record() -> cred_core::CredArtifactRecord {

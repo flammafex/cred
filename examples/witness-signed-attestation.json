@@ -1,7 +1,19 @@
 {
   "contract_version": "sophia/v1",
   "artifact_type": "witness.signed_attestation",
-  "attestation_id": "attestation-example-1",
-  "claim_hash": "f2ca1bb6c7e907d06dafe4687e579fce7d08f0f2514ee1f2787e118c67d84fbf",
-  "signature": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+  "attestation": {
+    "hash": "f2ca1bb6c7e907d06dafe4687e579fce7d08f0f2514ee1f2787e118c67d84fbf",
+    "timestamp": 1767225602,
+    "network_id": "witness:local",
+    "sequence": 1
+  },
+  "signatures": {
+    "kind": "multisig",
+    "signatures": [
+      {
+        "witness_id": "witness:local:1",
+        "signature": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+      }
+    ]
+  }
 }

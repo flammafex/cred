@@ -62,7 +62,7 @@ cargo run -p cred-cli -- inspect examples/manifest.json
 cargo run -p cred-cli -- hash examples/action-request.json
 cargo run -p cred-cli -- --store ./tmp/cred-store key generate
 cargo run -p cred-cli -- --store ./tmp/cred-store key public
-cargo run -p cred-cli -- --store ./tmp/cred-store record add examples/witness-signed-attestation.json \
+cargo run -p cred-cli -- --store ./tmp/cred-store witness import examples/witness-signed-attestation.json \
   --record-id record-witness-attestation-1 \
   --cred-id cred:local:example
 cargo run -p cred-cli -- --store ./tmp/cred-store record list
@@ -74,9 +74,9 @@ cargo run -p cred-cli -- grant check \
   --grant examples/permission-grant.json \
   --request examples/action-request.json
 
-cargo run -p cred-cli -- --store ./tmp/cred-store present \
-  --request examples/action-request.json \
-  --grant examples/permission-grant.json \
+cargo run -p cred-cli -- --store ./tmp/cred-store witness present \
+  --request examples/witness-presentation-request.json \
+  --grant examples/witness-permission-grant.json \
   --record-id record-witness-attestation-1 \
   --presentation-id presentation-record-1 \
   --cred-id cred:local:example \
@@ -87,6 +87,12 @@ cargo run -p cred-cli -- present \
   --artifact examples/manifest.json \
   --presentation-id presentation-smoke-1 \
   --cred-id cred:local:example
+```
+
+Witness adapter smoke:
+
+```bash
+./scripts/witness-adapter-smoke.sh
 ```
 
 ## Non-Goals

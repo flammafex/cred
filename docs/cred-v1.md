@@ -46,6 +46,21 @@ include:
 
 Unknown capabilities must require explicit user approval before use.
 
+## Witness Adapter
+
+The Cred CLI exposes a named Witness adapter:
+
+- `cred witness import` accepts only `sophia/v1`
+  `witness.signed_attestation` artifacts and writes a slim
+  `cred.artifact_record`.
+- `cred witness present` presents an imported Witness attestation by reference,
+  optionally gated by a `cred.permission_grant` and signed with the controller
+  key.
+
+The adapter is intentionally narrow. It does not verify Witness node signatures
+itself; it preserves the Witness artifact hash and lets apps combine Cred
+presentation verification with Witness verification.
+
 ## Grant Enforcement
 
 A `cred.action_request` is allowed only when it matches a
