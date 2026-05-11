@@ -82,6 +82,17 @@ cargo run -p cred-cli -- --store ./tmp/cred-store witness present \
   --cred-id cred:local:example \
   --signing-key ./tmp/cred-store/controller_sk.hex
 
+cargo run -p cred-cli -- --store ./tmp/cred-store freebird import-check examples/freebird-check-request.json \
+  --record-id record-freebird-check-1 \
+  --cred-id cred:local:example
+cargo run -p cred-cli -- --store ./tmp/cred-store freebird present-check \
+  --request examples/freebird-presentation-request.json \
+  --grant examples/freebird-permission-grant.json \
+  --record-id record-freebird-check-1 \
+  --presentation-id presentation-freebird-check-1 \
+  --cred-id cred:local:example \
+  --signing-key ./tmp/cred-store/controller_sk.hex
+
 cargo run -p cred-cli -- present \
   --request examples/action-request.json \
   --artifact examples/manifest.json \
@@ -93,6 +104,7 @@ Witness adapter smoke:
 
 ```bash
 ./scripts/witness-adapter-smoke.sh
+./scripts/freebird-adapter-smoke.sh
 ```
 
 ## Non-Goals

@@ -45,6 +45,11 @@ enum Command {
         #[command(subcommand)]
         command: WitnessCommand,
     },
+    /// Work with non-consuming Freebird artifacts through Cred.
+    Freebird {
+        #[command(subcommand)]
+        command: FreebirdCommand,
+    },
     /// Build Cred artifacts from existing JSON.
     Record {
         #[command(subcommand)]
@@ -108,6 +113,14 @@ enum WitnessCommand {
     Import(WitnessImportCommand),
     /// Present an imported Witness attestation by reference.
     Present(WitnessPresentCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum FreebirdCommand {
+    /// Import a freebird.check_request into Cred records.
+    ImportCheck(FreebirdImportCheckCommand),
+    /// Present an imported non-consuming Freebird check request by reference.
+    PresentCheck(FreebirdPresentCheckCommand),
 }
 
 #[derive(Debug, Args)]
@@ -183,6 +196,47 @@ struct WitnessPresentCommand {
 }
 
 #[derive(Debug, Args)]
+struct FreebirdImportCheckCommand {
+    check_request: PathBuf,
+    #[arg(long)]
+    record_id: String,
+    #[arg(long)]
+    cred_id: String,
+    #[arg(long, default_value = "private")]
+    privacy: String,
+    #[arg(long, default_value = "external_reference")]
+    custody: String,
+    #[arg(long)]
+    artifact_uri: Option<String>,
+    #[arg(long, default_value = "app:freebird")]
+    source_app: String,
+    #[arg(long = "label")]
+    labels: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct FreebirdPresentCheckCommand {
+    #[arg(long)]
+    request: PathBuf,
+    #[arg(long)]
+    record_id: String,
+    #[arg(long)]
+    grant: Option<PathBuf>,
+    #[arg(long, env = "CRED_CONTROLLER_SK")]
+    signing_key: Option<PathBuf>,
+    #[arg(long, default_value_t = 0)]
+    uses_so_far: u64,
+    #[arg(long)]
+    now: Option<u64>,
+    #[arg(long)]
+    presentation_id: String,
+    #[arg(long)]
+    cred_id: String,
+    #[arg(long)]
+    disclosure: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct RecordGetCommand {
     record_id: String,
 }
@@ -232,6 +286,7 @@ fn main() -> Result<()> {
         Command::Verify(path) => verify(path.path),
         Command::Key { command } => key(command, store),
         Command::Witness { command } => witness(command, store),
+        Command::Freebird { command } => freebird(command, store),
         Command::Record { command } => record(command, store),
         Command::Grant {
             command: GrantCommand::Check(command),
@@ -423,6 +478,111 @@ fn ensure_witness_signed_attestation(value: &Value) -> Result<()> {
         "witness.signed_attestation missing signatures"
     );
     Ok(())
+}
+
+fn freebird(command: FreebirdCommand, store_path: Option<PathBuf>) -> Result<()> {
+    match command {
+        FreebirdCommand::ImportCheck(command) => freebird_import_check(command, store_path),
+        FreebirdCommand::PresentCheck(command) => freebird_present_check(command, store_path),
+    }
+}
+
+fn freebird_import_check(
+    command: FreebirdImportCheckCommand,
+    store_path: Option<PathBuf>,
+) -> Result<()> {
+    let value = read_json(&command.check_request)?;
+    ensure_freebird_check_request(&value)?;
+    let artifact_hash = canonical_hash_hex(&value)?;
+    let artifact_uri = command.artifact_uri.or_else(|| {
+        if command.custody == "external_reference" {
+            Some(command.check_request.display().to_string())
+        } else {
+            None
+        }
+    });
+    let mut labels = command.labels;
+    if !labels.iter().any(|label| label == "freebird") {
+        labels.push("freebird".to_owned());
+    }
+    if !labels.iter().any(|label| label == "non_consuming") {
+        labels.push("non_consuming".to_owned());
+    }
+    let record = artifact_record(
+        command.record_id,
+        command.cred_id,
+        "freebird.check_request".to_owned(),
+        artifact_hash,
+        artifact_uri,
+        command.privacy,
+        command.custody,
+        Some(command.source_app),
+        now_unix()?,
+        Some(labels),
+    );
+    store_record(record, store_path)
+}
+
+fn freebird_present_check(
+    command: FreebirdPresentCheckCommand,
+    store_path: Option<PathBuf>,
+) -> Result<()> {
+    let store = record_store(store_path.clone())?;
+    let Some(record) = store.get_record(&command.record_id)? else {
+        bail!("record not found: {}", command.record_id);
+    };
+    ensure!(
+        record.stored_artifact_type == "freebird.check_request",
+        "record is not a non-consuming freebird.check_request: {}",
+        record.stored_artifact_type
+    );
+
+    present(
+        PresentCommand {
+            request: command.request,
+            artifact: None,
+            record_id: Some(command.record_id),
+            grant: command.grant,
+            signing_key: command.signing_key,
+            uses_so_far: command.uses_so_far,
+            now: command.now,
+            presentation_id: command.presentation_id,
+            cred_id: command.cred_id,
+            disclosure: command.disclosure.or_else(|| Some("reference".to_owned())),
+        },
+        store_path,
+    )
+}
+
+fn ensure_freebird_check_request(value: &Value) -> Result<()> {
+    let object = value
+        .as_object()
+        .context("Freebird check request must be a JSON object")?;
+    ensure!(
+        object.get("contract_version").and_then(Value::as_str) == Some("sophia/v1"),
+        "Freebird check request contract_version must be sophia/v1"
+    );
+    match object.get("artifact_type").and_then(Value::as_str) {
+        Some("freebird.check_request") => {}
+        Some("freebird.verify_request") => {
+            bail!("Cred Freebird adapter is non-consuming and rejects freebird.verify_request")
+        }
+        Some(other) => bail!("expected artifact_type freebird.check_request, got {other}"),
+        None => bail!("missing artifact_type; expected freebird.check_request"),
+    }
+    let token = object
+        .get("token_b64")
+        .and_then(Value::as_str)
+        .context("freebird.check_request missing token_b64")?;
+    ensure!(
+        !token.is_empty() && token.bytes().all(is_base64url_byte),
+        "freebird.check_request token_b64 must be non-empty base64url"
+    );
+    Ok(())
+}
+
+fn is_base64url_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
 }
 
 fn record(command: RecordCommand, store_path: Option<PathBuf>) -> Result<()> {
@@ -878,6 +1038,39 @@ mod tests {
             .contains("witness.signed_attestation missing signatures"));
     }
 
+    #[test]
+    fn freebird_adapter_accepts_check_request() {
+        ensure_freebird_check_request(&sample_freebird_check_request()).unwrap();
+    }
+
+    #[test]
+    fn freebird_adapter_rejects_consuming_verify_request() {
+        let err = ensure_freebird_check_request(&serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "freebird.verify_request",
+            "token_b64": "AQIDBAUGBwgJCgsMDQ4PEA"
+        }))
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("non-consuming and rejects freebird.verify_request"));
+    }
+
+    #[test]
+    fn freebird_adapter_rejects_invalid_token_shape() {
+        let err = ensure_freebird_check_request(&serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "freebird.check_request",
+            "token_b64": "not=base64url"
+        }))
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("token_b64 must be non-empty base64url"));
+    }
+
     fn sample_witness_attestation() -> Value {
         serde_json::json!({
             "contract_version": "sophia/v1",
@@ -894,6 +1087,14 @@ mod tests {
                     }
                 ]
             }
+        })
+    }
+
+    fn sample_freebird_check_request() -> Value {
+        serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "freebird.check_request",
+            "token_b64": "AQIDBAUGBwgJCgsMDQ4PEA"
         })
     }
 

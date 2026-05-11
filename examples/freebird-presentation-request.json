@@ -1,0 +1,17 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "cred.action_request",
+  "request_id": "request-freebird-check-1",
+  "app_id": "app:prestige:local",
+  "grant_id": "grant-freebird-check-1",
+  "requested_at": 1767225601,
+  "purpose": "present a non-consuming Freebird check request",
+  "actions": [
+    {
+      "kind": "freebird.present",
+      "audience": "prestige",
+      "semantic": "non_consuming_check",
+      "artifact_type": "freebird.check_request"
+    }
+  ]
+}

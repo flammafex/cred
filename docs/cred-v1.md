@@ -61,6 +61,20 @@ The adapter is intentionally narrow. It does not verify Witness node signatures
 itself; it preserves the Witness artifact hash and lets apps combine Cred
 presentation verification with Witness verification.
 
+## Freebird Adapter
+
+The Cred CLI exposes a named non-consuming Freebird adapter:
+
+- `cred freebird import-check` accepts only `sophia/v1`
+  `freebird.check_request` artifacts and writes a slim `cred.artifact_record`.
+- `cred freebird present-check` presents an imported check request by reference,
+  optionally gated by a `cred.permission_grant` and signed with the controller
+  key.
+
+Cred does not own consuming Freebird token flows. The Freebird adapter rejects
+`freebird.verify_request` artifacts and does not call `/v1/verify`; consuming
+verification remains an app or verifier responsibility.
+
 ## Grant Enforcement
 
 A `cred.action_request` is allowed only when it matches a
