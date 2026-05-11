@@ -1,14 +1,18 @@
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use cred_core::{
-    artifact_record, artifact_type, canonical_hash_hex, enforce_grant, manifest, validate_and_hash,
-    CredActionRequest, CredEndpoint, CredPermissionGrant, CredPresentation, GrantUsage,
-    PresentedArtifact,
+    artifact_record, artifact_type, canonical_hash_hex, enforce_grant, manifest,
+    public_key_from_secret_hex, sign_presentation, validate_and_hash,
+    verify_presentation_signature, CredActionRequest, CredEndpoint, CredPermissionGrant,
+    CredPresentation, GrantUsage, PresentedArtifact,
 };
 use cred_store::RecordStore;
 use serde_json::Value;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Parser)]
@@ -29,6 +33,13 @@ enum Command {
     Inspect(ArtifactPath),
     /// Hash any JSON artifact using Cred canonical JSON.
     Hash(ArtifactPath),
+    /// Verify a signed cred.presentation.
+    Verify(ArtifactPath),
+    /// Manage local controller keys.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
     /// Build Cred artifacts from existing JSON.
     Record {
         #[command(subcommand)]
@@ -78,6 +89,26 @@ enum GrantCommand {
     Check(GrantCheckCommand),
 }
 
+#[derive(Debug, Subcommand)]
+enum KeyCommand {
+    /// Generate a local Ed25519 controller secret key.
+    Generate(KeyGenerateCommand),
+    /// Print the public key for a local controller secret key.
+    Public(KeyPathCommand),
+}
+
+#[derive(Debug, Args)]
+struct KeyGenerateCommand {
+    #[arg(long, env = "CRED_CONTROLLER_SK")]
+    secret_key: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct KeyPathCommand {
+    #[arg(long, env = "CRED_CONTROLLER_SK")]
+    secret_key: Option<PathBuf>,
+}
+
 #[derive(Debug, Args)]
 struct RecordAddCommand {
     artifact: PathBuf,
@@ -87,8 +118,10 @@ struct RecordAddCommand {
     cred_id: String,
     #[arg(long, default_value = "selective")]
     privacy: String,
-    #[arg(long, default_value = "local_encrypted")]
+    #[arg(long, default_value = "external_reference")]
     custody: String,
+    #[arg(long)]
+    artifact_uri: Option<String>,
     #[arg(long)]
     source_app: Option<String>,
     #[arg(long = "label")]
@@ -110,6 +143,8 @@ struct PresentCommand {
     record_id: Option<String>,
     #[arg(long)]
     grant: Option<PathBuf>,
+    #[arg(long, env = "CRED_CONTROLLER_SK")]
+    signing_key: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
     uses_so_far: u64,
     #[arg(long)]
@@ -140,6 +175,8 @@ fn main() -> Result<()> {
         Command::Manifest(command) => print_manifest(command),
         Command::Inspect(path) => inspect(path.path),
         Command::Hash(path) => hash(path.path),
+        Command::Verify(path) => verify(path.path),
+        Command::Key { command } => key(command, store),
         Command::Record { command } => record(command, store),
         Command::Grant {
             command: GrantCommand::Check(command),
@@ -187,6 +224,64 @@ fn hash(path: PathBuf) -> Result<()> {
     print_json(&summary)
 }
 
+fn verify(path: PathBuf) -> Result<()> {
+    let value = read_json(&path)?;
+    let presentation: CredPresentation =
+        serde_json::from_value(value.clone()).context("artifact must be a cred.presentation")?;
+    verify_presentation_signature(&presentation)?;
+    let public_key = presentation
+        .cred_signature
+        .as_ref()
+        .expect("verified presentation has signature")
+        .public_key
+        .clone();
+    let summary = serde_json::json!({
+        "contract_version": "sophia/v1",
+        "artifact_type": "cred.verify_result",
+        "verified": true,
+        "verified_artifact_type": "cred.presentation",
+        "artifact_hash": canonical_hash_hex(&value)?,
+        "public_key": public_key
+    });
+    print_json(&summary)
+}
+
+fn key(command: KeyCommand, store_path: Option<PathBuf>) -> Result<()> {
+    match command {
+        KeyCommand::Generate(command) => key_generate(command, store_path),
+        KeyCommand::Public(command) => key_public(command, store_path),
+    }
+}
+
+fn key_generate(command: KeyGenerateCommand, store_path: Option<PathBuf>) -> Result<()> {
+    let path = controller_secret_key_path(command.secret_key, store_path)?;
+    let secret_key = generate_secret_key_hex()?;
+    write_secret_key(&path, &secret_key)?;
+    let public_key = public_key_from_secret_hex(&secret_key)?;
+    let summary = serde_json::json!({
+        "contract_version": "sophia/v1",
+        "artifact_type": "cred.key_result",
+        "scheme": "ed25519",
+        "public_key": public_key,
+        "secret_key_path": path
+    });
+    print_json(&summary)
+}
+
+fn key_public(command: KeyPathCommand, store_path: Option<PathBuf>) -> Result<()> {
+    let path = controller_secret_key_path(command.secret_key, store_path)?;
+    let secret_key = read_secret_key(&path)?;
+    let public_key = public_key_from_secret_hex(&secret_key)?;
+    let summary = serde_json::json!({
+        "contract_version": "sophia/v1",
+        "artifact_type": "cred.key_result",
+        "scheme": "ed25519",
+        "public_key": public_key,
+        "secret_key_path": path
+    });
+    print_json(&summary)
+}
+
 fn record(command: RecordCommand, store_path: Option<PathBuf>) -> Result<()> {
     match command {
         RecordCommand::Add(command) => record_add(command, store_path),
@@ -201,6 +296,13 @@ fn record_add(command: RecordAddCommand, store_path: Option<PathBuf>) -> Result<
         .context("artifact must include artifact_type")?
         .to_owned();
     let artifact_hash = canonical_hash_hex(&value)?;
+    let artifact_uri = command.artifact_uri.or_else(|| {
+        if command.custody == "external_reference" {
+            Some(command.artifact.display().to_string())
+        } else {
+            None
+        }
+    });
     let labels = if command.labels.is_empty() {
         None
     } else {
@@ -211,6 +313,7 @@ fn record_add(command: RecordAddCommand, store_path: Option<PathBuf>) -> Result<
         command.cred_id,
         stored_artifact_type,
         artifact_hash,
+        artifact_uri,
         command.privacy,
         command.custody,
         command.source_app,
@@ -306,7 +409,7 @@ fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
         )?;
     }
 
-    let presentation = CredPresentation {
+    let mut presentation = CredPresentation {
         contract_version: "sophia/v1".to_owned(),
         artifact_type: "cred.presentation".to_owned(),
         presentation_id: command.presentation_id,
@@ -325,6 +428,11 @@ fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
         cred_signature: None,
     };
     presentation.validate()?;
+    if let Some(signing_key) = command.signing_key {
+        let secret_key = read_secret_key(&signing_key)?;
+        presentation = sign_presentation(presentation, &secret_key)?;
+        verify_presentation_signature(&presentation)?;
+    }
     print_json(&presentation)
 }
 
@@ -459,6 +567,54 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
+fn controller_secret_key_path(
+    secret_key_path: Option<PathBuf>,
+    store_path: Option<PathBuf>,
+) -> Result<PathBuf> {
+    match secret_key_path {
+        Some(path) => Ok(path),
+        None => Ok(record_store(store_path)?.root().join("controller_sk.hex")),
+    }
+}
+
+fn generate_secret_key_hex() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    fs::File::open("/dev/urandom")
+        .context("open /dev/urandom")?
+        .read_exact(&mut bytes)
+        .context("read controller secret key entropy")?;
+    Ok(hex_encode(&bytes))
+}
+
+fn read_secret_key(path: &Path) -> Result<String> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(text.trim().to_owned())
+}
+
+fn write_secret_key(path: &Path, secret_key: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("create {}", path.display()))?;
+    file.write_all(secret_key.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 fn now_unix() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -547,6 +703,7 @@ mod tests {
             "cred:local:test".to_owned(),
             "witness.signed_attestation".to_owned(),
             "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            Some("examples/witness-signed-attestation.json".to_owned()),
             "selective".to_owned(),
             "local_encrypted".to_owned(),
             Some("app:witness:test".to_owned()),

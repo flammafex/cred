@@ -60,6 +60,8 @@ cargo run -p cred-cli -- manifest \
 
 cargo run -p cred-cli -- inspect examples/manifest.json
 cargo run -p cred-cli -- hash examples/action-request.json
+cargo run -p cred-cli -- --store ./tmp/cred-store key generate
+cargo run -p cred-cli -- --store ./tmp/cred-store key public
 cargo run -p cred-cli -- --store ./tmp/cred-store record add examples/witness-signed-attestation.json \
   --record-id record-witness-attestation-1 \
   --cred-id cred:local:example
@@ -77,7 +79,8 @@ cargo run -p cred-cli -- --store ./tmp/cred-store present \
   --grant examples/permission-grant.json \
   --record-id record-witness-attestation-1 \
   --presentation-id presentation-record-1 \
-  --cred-id cred:local:example
+  --cred-id cred:local:example \
+  --signing-key ./tmp/cred-store/controller_sk.hex
 
 cargo run -p cred-cli -- present \
   --request examples/action-request.json \
@@ -105,7 +108,8 @@ The first implementation is deliberately small:
 3. Store durable `cred.artifact_record` metadata.
 4. Accept a `cred.action_request` file.
 5. Enforce `cred.permission_grant` constraints for an action request.
-6. Return a mocked `cred.presentation` for embedded or referenced artifacts.
+6. Return a signed or unsigned `cred.presentation` for embedded or referenced
+   artifacts.
 
-That is enough to prove the app boundary before adding real key custody,
+That is enough to prove the app boundary before adding encrypted key custody,
 Freebird issuance, Witness timestamping, or Matchlock derivation.

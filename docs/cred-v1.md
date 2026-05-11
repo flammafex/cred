@@ -10,6 +10,13 @@ same local agent that granted permission. That key is not a universal human
 identity. Apps should treat Cred presentations as app-bound responses to
 specific requests.
 
+Cred v1 signs presentations with Ed25519 over canonical JSON with
+`cred_signature` omitted from the signed payload. The local CLI stores
+controller secret keys as hex files by explicit path or at
+`$CRED_STORE_DIR/controller_sk.hex`; generated files are created with owner-only
+permissions on Unix platforms. This is local key custody, not encrypted key
+management.
+
 ## Artifact Lifecycle
 
 1. `cred.manifest` advertises the agent's controller key, supported
@@ -79,5 +86,11 @@ The v1 local store writes records to `records.jsonl`, one validated
 `cred.artifact_record` per line. `record_id` values are unique within a store.
 The store is append-only metadata for now; raw artifact custody remains outside
 the durable record file.
+
+Cred v1 does not copy raw artifacts into a blob store. `record add` hashes the
+provided artifact and stores slim metadata. Records with
+`custody: "external_reference"` must include `artifact_uri`, which points to the
+external place where the raw artifact can be found if the user chooses to keep
+that locator.
 
 Schema: `contracts/schemas/cred-agent.schema.json`.

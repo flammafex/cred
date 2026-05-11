@@ -1,3 +1,4 @@
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -52,6 +53,12 @@ pub enum CredError {
     ArtifactTypeNotAllowed(String),
     #[error("requested export is not allowed by grant")]
     ExportNotAllowed,
+    #[error("invalid Ed25519 public key")]
+    InvalidPublicKey,
+    #[error("missing presentation signature")]
+    MissingPresentationSignature,
+    #[error("presentation signature verification failed")]
+    SignatureVerificationFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -205,6 +212,8 @@ pub struct CredArtifactRecord {
     pub stored_artifact_type: String,
     pub artifact_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub subject_hash: Option<String>,
     pub privacy: String,
     pub custody: String,
@@ -283,7 +292,11 @@ pub fn validate_cred_artifact(value: &Value) -> Result<CredArtifactKind, CredErr
             serde_json::from_value::<CredActionRequest>(value.clone())?.validate()?;
         }
         CredArtifactKind::Presentation => {
-            serde_json::from_value::<CredPresentation>(value.clone())?.validate()?;
+            let presentation = serde_json::from_value::<CredPresentation>(value.clone())?;
+            presentation.validate()?;
+            if presentation.cred_signature.is_some() {
+                verify_presentation_signature(&presentation)?;
+            }
         }
         CredArtifactKind::ArtifactRecord => {
             serde_json::from_value::<CredArtifactRecord>(value.clone())?.validate()?;
@@ -307,6 +320,58 @@ pub fn validate_and_hash(value: &Value) -> Result<(CredArtifactKind, String), Cr
     let kind = validate_cred_artifact(value)?;
     let hash = canonical_hash_hex(value)?;
     Ok((kind, hash))
+}
+
+pub fn public_key_from_secret_hex(secret_key_hex: &str) -> Result<String, CredError> {
+    let secret_key = decode_hex_array::<32>(secret_key_hex.trim(), "secret_key")?;
+    let signing_key = SigningKey::from_bytes(&secret_key);
+    Ok(hex::encode(signing_key.verifying_key().to_bytes()))
+}
+
+pub fn sign_presentation(
+    mut presentation: CredPresentation,
+    secret_key_hex: &str,
+) -> Result<CredPresentation, CredError> {
+    let secret_key = decode_hex_array::<32>(secret_key_hex.trim(), "secret_key")?;
+    let signing_key = SigningKey::from_bytes(&secret_key);
+    presentation.cred_signature = None;
+    let payload = presentation_signature_payload(&presentation)?;
+    let signature = signing_key.sign(&payload);
+    presentation.cred_signature = Some(CredSignature {
+        scheme: "ed25519".to_owned(),
+        public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+        signature: hex::encode(signature.to_bytes()),
+    });
+    presentation.validate()?;
+    Ok(presentation)
+}
+
+pub fn verify_presentation_signature(presentation: &CredPresentation) -> Result<(), CredError> {
+    presentation.validate()?;
+    let signature = presentation
+        .cred_signature
+        .as_ref()
+        .ok_or(CredError::MissingPresentationSignature)?;
+    let public_key = decode_hex_array::<32>(&signature.public_key, "signature.public_key")?;
+    let signature_bytes = decode_hex_array::<64>(&signature.signature, "signature.signature")?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&public_key).map_err(|_| CredError::InvalidPublicKey)?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let payload = presentation_signature_payload(presentation)?;
+
+    verifying_key
+        .verify(&payload, &signature)
+        .map_err(|_| CredError::SignatureVerificationFailed)
+}
+
+pub fn presentation_signature_payload(
+    presentation: &CredPresentation,
+) -> Result<Vec<u8>, CredError> {
+    let mut unsigned = presentation.clone();
+    unsigned.cred_signature = None;
+    unsigned.validate()?;
+    let value = serde_json::to_value(unsigned)?;
+    canonical_json(&value)
 }
 
 pub fn enforce_grant(
@@ -569,6 +634,9 @@ impl CredArtifactRecord {
         validate_non_empty(&self.cred_id, "cred_id")?;
         validate_non_empty(&self.stored_artifact_type, "stored_artifact_type")?;
         validate_hex(&self.artifact_hash, "artifact_hash", 32)?;
+        if let Some(artifact_uri) = &self.artifact_uri {
+            validate_non_empty(artifact_uri, "artifact_uri")?;
+        }
         if let Some(subject_hash) = &self.subject_hash {
             validate_hex(subject_hash, "subject_hash", 32)?;
         }
@@ -587,6 +655,9 @@ impl CredArtifactRecord {
                 "secret_derived",
             ],
         )?;
+        if self.custody == "external_reference" && self.artifact_uri.is_none() {
+            return Err(CredError::EmptyField("artifact_uri"));
+        }
         if let Some(source_app) = &self.source_app {
             validate_non_empty(source_app, "source_app")?;
         }
@@ -633,6 +704,21 @@ fn validate_hex(value: &str, field: &'static str, expected_bytes: usize) -> Resu
         });
     }
     Ok(())
+}
+
+fn decode_hex_array<const N: usize>(
+    value: &str,
+    field: &'static str,
+) -> Result<[u8; N], CredError> {
+    validate_hex(value, field, N)?;
+    let bytes = hex::decode(value).map_err(|_| CredError::InvalidHex {
+        field,
+        expected_bytes: N,
+    })?;
+    bytes.try_into().map_err(|_| CredError::InvalidHex {
+        field,
+        expected_bytes: N,
+    })
 }
 
 fn validate_enum(
@@ -798,6 +884,7 @@ pub fn artifact_record(
     cred_id: String,
     stored_artifact_type: String,
     artifact_hash: String,
+    artifact_uri: Option<String>,
     privacy: String,
     custody: String,
     source_app: Option<String>,
@@ -811,6 +898,7 @@ pub fn artifact_record(
         cred_id,
         stored_artifact_type,
         artifact_hash,
+        artifact_uri,
         subject_hash: None,
         privacy,
         custody,
@@ -981,6 +1069,60 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn signs_and_verifies_presentation() {
+        let secret_key = "1111111111111111111111111111111111111111111111111111111111111111";
+        let signed = sign_presentation(example_presentation(), secret_key).unwrap();
+        let signature = signed.cred_signature.as_ref().unwrap();
+
+        assert_eq!(signature.scheme, "ed25519");
+        assert_eq!(
+            signature.public_key,
+            public_key_from_secret_hex(secret_key).unwrap()
+        );
+        verify_presentation_signature(&signed).unwrap();
+
+        let value = serde_json::to_value(&signed).unwrap();
+        validate_cred_artifact(&value).unwrap();
+    }
+
+    #[test]
+    fn rejects_tampered_presentation_signature() {
+        let signed = sign_presentation(
+            example_presentation(),
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .unwrap();
+        let mut tampered = signed;
+        tampered.app_id = "app:clout:local".to_owned();
+
+        assert!(matches!(
+            verify_presentation_signature(&tampered),
+            Err(CredError::SignatureVerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn external_reference_records_require_uri() {
+        let record = artifact_record(
+            "record-1".to_owned(),
+            "cred:local:test".to_owned(),
+            "witness.signed_attestation".to_owned(),
+            "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            None,
+            "selective".to_owned(),
+            "external_reference".to_owned(),
+            None,
+            1,
+            None,
+        );
+
+        assert!(matches!(
+            record.validate(),
+            Err(CredError::EmptyField("artifact_uri"))
+        ));
+    }
+
     fn example_grant() -> CredPermissionGrant {
         CredPermissionGrant {
             contract_version: CONTRACT_VERSION.to_owned(),
@@ -1040,6 +1182,28 @@ mod tests {
                     reason: None,
                 },
             ],
+        }
+    }
+
+    fn example_presentation() -> CredPresentation {
+        CredPresentation {
+            contract_version: CONTRACT_VERSION.to_owned(),
+            artifact_type: "cred.presentation".to_owned(),
+            presentation_id: "presentation-1".to_owned(),
+            cred_id: "cred:local:test".to_owned(),
+            request_id: "request-vote-1".to_owned(),
+            grant_id: Some("grant-prestige-1".to_owned()),
+            app_id: "app:prestige:local".to_owned(),
+            created_at: 1767225602,
+            artifacts: vec![PresentedArtifact {
+                artifact_type: "witness.signed_attestation".to_owned(),
+                artifact_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_owned(),
+                record_id: Some("record-1".to_owned()),
+                disclosure: "reference".to_owned(),
+                artifact: None,
+            }],
+            cred_signature: None,
         }
     }
 }

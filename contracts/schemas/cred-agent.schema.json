@@ -245,6 +245,7 @@
             "cred_id": { "$ref": "#/$defs/id" },
             "stored_artifact_type": { "type": "string", "minLength": 1 },
             "artifact_hash": { "$ref": "#/$defs/hexSha256" },
+            "artifact_uri": { "type": "string", "minLength": 1 },
             "subject_hash": { "$ref": "#/$defs/hexSha256" },
             "privacy": { "enum": ["public", "selective", "private", "secret"] },
             "custody": { "enum": ["local_encrypted", "external_reference", "ephemeral", "secret_derived"] },
@@ -256,6 +257,19 @@
               "uniqueItems": true
             }
           },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "custody": { "const": "external_reference" }
+                },
+                "required": ["custody"]
+              },
+              "then": {
+                "required": ["artifact_uri"]
+              }
+            }
+          ],
           "additionalProperties": false
         }
       ]

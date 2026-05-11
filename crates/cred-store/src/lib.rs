@@ -158,6 +158,7 @@ mod tests {
             "cred:local:test".to_owned(),
             "cred.presentation".to_owned(),
             "1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
+            None,
             "selective".to_owned(),
             "local_encrypted".to_owned(),
             Some("app:test".to_owned()),
