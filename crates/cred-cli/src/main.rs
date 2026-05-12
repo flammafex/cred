@@ -96,6 +96,8 @@ enum RecordCommand {
     List,
     /// Get one stored cred.artifact_record by ID.
     Get(RecordGetCommand),
+    /// Decrypt and print a local encrypted artifact by record ID.
+    Reveal(RecordRevealCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -165,6 +167,8 @@ struct RecordAddCommand {
     source_app: Option<String>,
     #[arg(long = "label")]
     labels: Vec<String>,
+    #[arg(long, env = "CRED_VAULT_PASSPHRASE")]
+    vault_passphrase: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -184,6 +188,8 @@ struct WitnessImportCommand {
     source_app: String,
     #[arg(long = "label")]
     labels: Vec<String>,
+    #[arg(long, env = "CRED_VAULT_PASSPHRASE")]
+    vault_passphrase: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -225,6 +231,8 @@ struct FreebirdImportCheckCommand {
     source_app: String,
     #[arg(long = "label")]
     labels: Vec<String>,
+    #[arg(long, env = "CRED_VAULT_PASSPHRASE")]
+    vault_passphrase: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -266,6 +274,8 @@ struct MatchlockImportArtifactCommand {
     source_app: String,
     #[arg(long = "label")]
     labels: Vec<String>,
+    #[arg(long, env = "CRED_VAULT_PASSPHRASE")]
+    vault_passphrase: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -293,6 +303,13 @@ struct MatchlockPresentArtifactCommand {
 #[derive(Debug, Args)]
 struct RecordGetCommand {
     record_id: String,
+}
+
+#[derive(Debug, Args)]
+struct RecordRevealCommand {
+    record_id: String,
+    #[arg(long, env = "CRED_VAULT_PASSPHRASE")]
+    vault_passphrase: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -458,17 +475,17 @@ fn witness_import(command: WitnessImportCommand, store_path: Option<PathBuf>) ->
     let value = read_json(&command.attestation)?;
     ensure_witness_signed_attestation(&value)?;
     let artifact_hash = canonical_hash_hex(&value)?;
-    let artifact_uri = command.artifact_uri.or_else(|| {
-        if command.custody == "external_reference" {
-            Some(command.attestation.display().to_string())
-        } else {
-            None
-        }
-    });
+    let artifact_uri = artifact_uri_for_custody(
+        &command.custody,
+        command.artifact_uri,
+        &command.record_id,
+        &command.attestation,
+    )?;
     let mut labels = command.labels;
     if !labels.iter().any(|label| label == "witness") {
         labels.push("witness".to_owned());
     }
+    let vault_passphrase = command.vault_passphrase;
     let record = artifact_record(
         command.record_id,
         command.cred_id,
@@ -481,7 +498,7 @@ fn witness_import(command: WitnessImportCommand, store_path: Option<PathBuf>) ->
         now_unix()?,
         Some(labels),
     );
-    store_record(record, store_path)
+    store_record_with_optional_artifact(record, &value, vault_passphrase.as_deref(), store_path)
 }
 
 fn witness_present(command: WitnessPresentCommand, store_path: Option<PathBuf>) -> Result<()> {
@@ -549,13 +566,12 @@ fn freebird_import_check(
     let value = read_json(&command.check_request)?;
     ensure_freebird_check_request(&value)?;
     let artifact_hash = canonical_hash_hex(&value)?;
-    let artifact_uri = command.artifact_uri.or_else(|| {
-        if command.custody == "external_reference" {
-            Some(command.check_request.display().to_string())
-        } else {
-            None
-        }
-    });
+    let artifact_uri = artifact_uri_for_custody(
+        &command.custody,
+        command.artifact_uri,
+        &command.record_id,
+        &command.check_request,
+    )?;
     let mut labels = command.labels;
     if !labels.iter().any(|label| label == "freebird") {
         labels.push("freebird".to_owned());
@@ -563,6 +579,7 @@ fn freebird_import_check(
     if !labels.iter().any(|label| label == "non_consuming") {
         labels.push("non_consuming".to_owned());
     }
+    let vault_passphrase = command.vault_passphrase;
     let record = artifact_record(
         command.record_id,
         command.cred_id,
@@ -575,7 +592,7 @@ fn freebird_import_check(
         now_unix()?,
         Some(labels),
     );
-    store_record(record, store_path)
+    store_record_with_optional_artifact(record, &value, vault_passphrase.as_deref(), store_path)
 }
 
 fn freebird_present_check(
@@ -657,17 +674,17 @@ fn matchlock_import_artifact(
     ensure_matchlock_presentation_safe_artifact(&value)?;
     let stored_artifact_type = artifact_type(&value)?.to_owned();
     let artifact_hash = canonical_hash_hex(&value)?;
-    let artifact_uri = command.artifact_uri.or_else(|| {
-        if command.custody == "external_reference" {
-            Some(command.artifact.display().to_string())
-        } else {
-            None
-        }
-    });
+    let artifact_uri = artifact_uri_for_custody(
+        &command.custody,
+        command.artifact_uri,
+        &command.record_id,
+        &command.artifact,
+    )?;
     let mut labels = command.labels;
     if !labels.iter().any(|label| label == "matchlock") {
         labels.push("matchlock".to_owned());
     }
+    let vault_passphrase = command.vault_passphrase;
     let record = artifact_record(
         command.record_id,
         command.cred_id,
@@ -680,7 +697,7 @@ fn matchlock_import_artifact(
         now_unix()?,
         Some(labels),
     );
-    store_record(record, store_path)
+    store_record_with_optional_artifact(record, &value, vault_passphrase.as_deref(), store_path)
 }
 
 fn matchlock_present_artifact(
@@ -915,6 +932,7 @@ fn record(command: RecordCommand, store_path: Option<PathBuf>) -> Result<()> {
         RecordCommand::Add(command) => record_add(command, store_path),
         RecordCommand::List => record_list(store_path),
         RecordCommand::Get(command) => record_get(command, store_path),
+        RecordCommand::Reveal(command) => record_reveal(command, store_path),
     }
 }
 
@@ -924,18 +942,18 @@ fn record_add(command: RecordAddCommand, store_path: Option<PathBuf>) -> Result<
         .context("artifact must include artifact_type")?
         .to_owned();
     let artifact_hash = canonical_hash_hex(&value)?;
-    let artifact_uri = command.artifact_uri.or_else(|| {
-        if command.custody == "external_reference" {
-            Some(command.artifact.display().to_string())
-        } else {
-            None
-        }
-    });
+    let artifact_uri = artifact_uri_for_custody(
+        &command.custody,
+        command.artifact_uri,
+        &command.record_id,
+        &command.artifact,
+    )?;
     let labels = if command.labels.is_empty() {
         None
     } else {
         Some(command.labels)
     };
+    let vault_passphrase = command.vault_passphrase;
     let record = artifact_record(
         command.record_id,
         command.cred_id,
@@ -948,12 +966,29 @@ fn record_add(command: RecordAddCommand, store_path: Option<PathBuf>) -> Result<
         now_unix()?,
         labels,
     );
-    store_record(record, store_path)
+    store_record_with_optional_artifact(record, &value, vault_passphrase.as_deref(), store_path)
 }
 
-fn store_record(record: cred_core::CredArtifactRecord, store_path: Option<PathBuf>) -> Result<()> {
+fn store_record_with_optional_artifact(
+    record: cred_core::CredArtifactRecord,
+    artifact: &Value,
+    vault_passphrase: Option<&str>,
+    store_path: Option<PathBuf>,
+) -> Result<()> {
     record.validate()?;
-    record_store(store_path)?.append_record(&record)?;
+    let store = record_store(store_path)?;
+    if store.get_record(&record.record_id)?.is_some() {
+        bail!("record already exists: {}", record.record_id);
+    }
+    if record.custody == "local_encrypted" {
+        let passphrase = vault_passphrase
+            .filter(|passphrase| !passphrase.is_empty())
+            .context(
+                "local_encrypted custody requires --vault-passphrase or CRED_VAULT_PASSPHRASE",
+            )?;
+        store.write_encrypted_artifact(&record, artifact, passphrase)?;
+    }
+    store.append_record(&record)?;
     print_json(&record)
 }
 
@@ -975,12 +1010,57 @@ fn record_get(command: RecordGetCommand, store_path: Option<PathBuf>) -> Result<
     print_json(&record)
 }
 
+fn record_reveal(command: RecordRevealCommand, store_path: Option<PathBuf>) -> Result<()> {
+    let store = record_store(store_path)?;
+    let Some(record) = store.get_record(&command.record_id)? else {
+        bail!("record not found: {}", command.record_id);
+    };
+    ensure!(
+        record.custody == "local_encrypted",
+        "record is not local_encrypted: {}",
+        record.custody
+    );
+    let passphrase = command
+        .vault_passphrase
+        .as_deref()
+        .filter(|passphrase| !passphrase.is_empty())
+        .context("record reveal requires --vault-passphrase or CRED_VAULT_PASSPHRASE")?;
+    let artifact = store.read_encrypted_artifact(&record, passphrase)?;
+    print_json(&artifact)
+}
+
 fn record_store(store_path: Option<PathBuf>) -> Result<RecordStore> {
     let root = match store_path {
         Some(path) => path,
         None => RecordStore::default_root()?,
     };
     Ok(RecordStore::new(root))
+}
+
+fn artifact_uri_for_custody(
+    custody: &str,
+    explicit_uri: Option<String>,
+    record_id: &str,
+    artifact_path: &Path,
+) -> Result<Option<String>> {
+    if custody == "local_encrypted" {
+        let vault_uri = RecordStore::vault_blob_uri(record_id);
+        if let Some(explicit_uri) = explicit_uri {
+            ensure!(
+                explicit_uri == vault_uri,
+                "local_encrypted custody uses Cred-managed vault URI: {vault_uri}"
+            );
+        }
+        return Ok(Some(vault_uri));
+    }
+
+    if let Some(explicit_uri) = explicit_uri {
+        return Ok(Some(explicit_uri));
+    }
+    if custody == "external_reference" {
+        return Ok(Some(artifact_path.display().to_string()));
+    }
+    Ok(None)
 }
 
 fn grant_check(command: GrantCheckCommand) -> Result<()> {

@@ -68,8 +68,16 @@ cargo run -p cred-cli -- --store ./tmp/cred-store witness import examples/witnes
   --cred-id cred:local:example
 cargo run -p cred-cli -- --store ./tmp/cred-store record list
 cargo run -p cred-cli -- --store ./tmp/cred-store record get record-witness-attestation-1
+cargo run -p cred-cli -- --store ./tmp/cred-store record add examples/witness-signed-attestation.json \
+  --record-id record-vault-witness-1 \
+  --cred-id cred:local:example \
+  --custody local_encrypted \
+  --vault-passphrase "$CRED_VAULT_PASSPHRASE"
+cargo run -p cred-cli -- --store ./tmp/cred-store record reveal record-vault-witness-1 \
+  --vault-passphrase "$CRED_VAULT_PASSPHRASE"
 
 # If --store is omitted, Cred uses CRED_STORE_DIR or $HOME/.local/share/cred.
+# If --vault-passphrase is omitted, Cred uses CRED_VAULT_PASSPHRASE.
 
 cargo run -p cred-cli -- grant check \
   --grant examples/permission-grant.json \
@@ -118,6 +126,7 @@ Witness adapter smoke:
 ./scripts/witness-adapter-smoke.sh
 ./scripts/freebird-adapter-smoke.sh
 ./scripts/matchlock-adapter-smoke.sh
+./scripts/vault-smoke.sh
 ```
 
 ## Non-Goals
@@ -126,6 +135,7 @@ Cred must not:
 
 - turn one controller key into a universal identity.
 - publish private keys, Matchlock secrets, or unspent credentials.
+- store plaintext artifacts in durable vault blobs.
 - treat HyperToken peer identity as authority.
 - make app-local claims trustworthy without app payload signatures or proofs.
 - silently grant unknown capabilities.
@@ -142,5 +152,5 @@ The first implementation is deliberately small:
 6. Return a signed or unsigned `cred.presentation` for embedded or referenced
    artifacts.
 
-That is enough to prove the app boundary before adding encrypted key custody,
-Freebird issuance, Witness timestamping, or Matchlock derivation.
+That is enough to prove the app boundary before adding app-facing service
+transport, Freebird issuance, Witness timestamping, or Matchlock derivation.

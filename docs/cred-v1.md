@@ -131,13 +131,26 @@ Matchlock private inputs, unspent Freebird tokens, or other secret material.
 
 The v1 local store writes records to `records.jsonl`, one validated
 `cred.artifact_record` per line. `record_id` values are unique within a store.
-The store is append-only metadata for now; raw artifact custody remains outside
-the durable record file.
+The durable record file remains a slim index even when Cred has local custody
+of the raw artifact.
 
-Cred v1 does not copy raw artifacts into a blob store. `record add` hashes the
-provided artifact and stores slim metadata. Records with
-`custody: "external_reference"` must include `artifact_uri`, which points to the
-external place where the raw artifact can be found if the user chooses to keep
-that locator.
+Cred v1 supports two durable custody modes:
+
+- `external_reference`: Cred hashes the provided artifact and stores metadata
+  with an `artifact_uri` pointing to the external location.
+- `local_encrypted`: Cred canonicalizes the provided artifact, encrypts it as a
+  local blob, and stores only the blob URI and plaintext hash in
+  `cred.artifact_record`.
+
+Local encrypted blobs use XChaCha20-Poly1305 with a 192-bit nonce. The content
+encryption key is derived from the vault passphrase with scrypt using per-blob
+salt. The encrypted blob stores encryption parameters, the plaintext artifact
+hash, the stored artifact type, and ciphertext. It must not contain plaintext
+artifact fields.
+
+Use `--vault-passphrase` or `CRED_VAULT_PASSPHRASE` for commands that create or
+reveal `local_encrypted` records. `record reveal` decrypts a local encrypted
+record, verifies the decrypted artifact hash against the record, and prints the
+artifact.
 
 Schema: `contracts/schemas/cred-agent.schema.json`.
