@@ -313,6 +313,16 @@ impl RecordStore {
         Ok(value)
     }
 
+    pub fn encrypted_artifact_exists(
+        &self,
+        record: &CredArtifactRecord,
+    ) -> Result<bool, StoreError> {
+        if record.custody != "local_encrypted" {
+            return Ok(false);
+        }
+        Ok(self.vault_blob_path(record)?.exists())
+    }
+
     fn ensure_expected_vault_uri(&self, record: &CredArtifactRecord) -> Result<(), StoreError> {
         if record.artifact_uri.as_deref() == Some(&Self::vault_blob_uri(&record.record_id)) {
             Ok(())
@@ -475,6 +485,22 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, StoreError::Crypto));
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn reports_encrypted_blob_presence() {
+        let root = temp_store_root("blob-presence");
+        let store = RecordStore::new(&root);
+        let artifact = sample_artifact();
+        let record = encrypted_record("record-secret-1", canonical_hash_hex(&artifact).unwrap());
+
+        assert!(!store.encrypted_artifact_exists(&record).unwrap());
+        store
+            .write_encrypted_artifact(&record, &artifact, "correct horse")
+            .unwrap();
+        assert!(store.encrypted_artifact_exists(&record).unwrap());
 
         cleanup(root);
     }

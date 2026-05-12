@@ -20,11 +20,13 @@ cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p cred-cli >/dev/null
   --vault-passphrase "$PASSPHRASE" \
   >"$STORE_DIR/revealed.json"
 "$BIN" hash "$STORE_DIR/revealed.json" >"$STORE_DIR/hash.json"
+"$BIN" --store "$STORE_DIR" vault inventory >"$STORE_DIR/inventory.json"
 
 node "$ROOT_DIR/scripts/vault-smoke-check.mjs" \
   "$STORE_DIR/record.json" \
   "$STORE_DIR/revealed.json" \
   "$STORE_DIR/hash.json" \
+  "$STORE_DIR/inventory.json" \
   "$STORE_DIR"
 
 if "$BIN" --store "$STORE_DIR" record reveal record-vault-witness-1 \

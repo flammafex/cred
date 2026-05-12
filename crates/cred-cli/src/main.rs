@@ -7,7 +7,9 @@ use cred_core::{
     CredPresentation, GrantUsage, PresentedArtifact,
 };
 use cred_store::RecordStore;
+use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -60,6 +62,11 @@ enum Command {
         #[command(subcommand)]
         command: RecordCommand,
     },
+    /// Inspect local vault holdings without decrypting artifacts.
+    Vault {
+        #[command(subcommand)]
+        command: VaultCommand,
+    },
     /// Check an action request against a permission grant.
     Grant {
         #[command(subcommand)]
@@ -98,6 +105,12 @@ enum RecordCommand {
     Get(RecordGetCommand),
     /// Decrypt and print a local encrypted artifact by record ID.
     Reveal(RecordRevealCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum VaultCommand {
+    /// Summarize local records, custody modes, and encrypted blob presence.
+    Inventory,
 }
 
 #[derive(Debug, Subcommand)]
@@ -360,6 +373,7 @@ fn main() -> Result<()> {
         Command::Freebird { command } => freebird(command, store),
         Command::Matchlock { command } => matchlock(command, store),
         Command::Record { command } => record(command, store),
+        Command::Vault { command } => vault(command, store),
         Command::Grant {
             command: GrantCommand::Check(command),
         } => grant_check(command),
@@ -1061,6 +1075,154 @@ fn artifact_uri_for_custody(
         return Ok(Some(artifact_path.display().to_string()));
     }
     Ok(None)
+}
+
+fn vault(command: VaultCommand, store_path: Option<PathBuf>) -> Result<()> {
+    match command {
+        VaultCommand::Inventory => vault_inventory(store_path),
+    }
+}
+
+fn vault_inventory(store_path: Option<PathBuf>) -> Result<()> {
+    let store = record_store(store_path)?;
+    let records = store.list_records()?;
+    let mut artifact_types = BTreeMap::new();
+    let mut custody = BTreeMap::new();
+    let mut privacy = BTreeMap::new();
+    let mut holdings = Vec::with_capacity(records.len());
+    let mut local_encrypted_present = 0_u64;
+    let mut local_encrypted_missing = 0_u64;
+
+    for record in records {
+        increment_count(&mut artifact_types, &record.stored_artifact_type);
+        increment_count(&mut custody, &record.custody);
+        increment_count(&mut privacy, &record.privacy);
+
+        let local_artifact = local_artifact_summary(&store, &record)?;
+        if record.custody == "local_encrypted" {
+            if local_artifact.present {
+                local_encrypted_present += 1;
+            } else {
+                local_encrypted_missing += 1;
+            }
+        }
+
+        holdings.push(InventoryHolding {
+            record_id: record.record_id,
+            cred_id: record.cred_id,
+            category: artifact_category(&record.stored_artifact_type).to_owned(),
+            stored_artifact_type: record.stored_artifact_type,
+            artifact_hash: record.artifact_hash,
+            artifact_uri: record.artifact_uri,
+            privacy: record.privacy,
+            custody: record.custody,
+            source_app: record.source_app,
+            created_at: record.created_at,
+            labels: record.labels.unwrap_or_default(),
+            local_artifact,
+        });
+    }
+
+    let inventory = VaultInventory {
+        contract_version: "sophia/v1",
+        artifact_type: "cred.vault_inventory",
+        store_root: store.root().display().to_string(),
+        total_records: holdings.len() as u64,
+        artifact_types,
+        custody,
+        privacy,
+        local_encrypted: LocalEncryptedSummary {
+            present: local_encrypted_present,
+            missing: local_encrypted_missing,
+        },
+        holdings,
+    };
+    print_json(&inventory)
+}
+
+#[derive(Debug, Serialize)]
+struct VaultInventory {
+    contract_version: &'static str,
+    artifact_type: &'static str,
+    store_root: String,
+    total_records: u64,
+    artifact_types: BTreeMap<String, u64>,
+    custody: BTreeMap<String, u64>,
+    privacy: BTreeMap<String, u64>,
+    local_encrypted: LocalEncryptedSummary,
+    holdings: Vec<InventoryHolding>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalEncryptedSummary {
+    present: u64,
+    missing: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct InventoryHolding {
+    record_id: String,
+    cred_id: String,
+    category: String,
+    stored_artifact_type: String,
+    artifact_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_uri: Option<String>,
+    privacy: String,
+    custody: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_app: Option<String>,
+    created_at: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    labels: Vec<String>,
+    local_artifact: LocalArtifactSummary,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalArtifactSummary {
+    encrypted: bool,
+    present: bool,
+    status: String,
+}
+
+fn local_artifact_summary(
+    store: &RecordStore,
+    record: &cred_core::CredArtifactRecord,
+) -> Result<LocalArtifactSummary> {
+    if record.custody == "local_encrypted" {
+        let present = store.encrypted_artifact_exists(record)?;
+        return Ok(LocalArtifactSummary {
+            encrypted: true,
+            present,
+            status: if present {
+                "local_encrypted_present".to_owned()
+            } else {
+                "local_encrypted_missing".to_owned()
+            },
+        });
+    }
+    if record.custody == "external_reference" {
+        return Ok(LocalArtifactSummary {
+            encrypted: false,
+            present: false,
+            status: "external_reference".to_owned(),
+        });
+    }
+    Ok(LocalArtifactSummary {
+        encrypted: false,
+        present: false,
+        status: "metadata_only".to_owned(),
+    })
+}
+
+fn artifact_category(artifact_type: &str) -> &str {
+    artifact_type
+        .split_once('.')
+        .map_or(artifact_type, |(prefix, _)| prefix)
+}
+
+fn increment_count(counts: &mut BTreeMap<String, u64>, key: &str) {
+    *counts.entry(key.to_owned()).or_insert(0) += 1;
 }
 
 fn grant_check(command: GrantCheckCommand) -> Result<()> {

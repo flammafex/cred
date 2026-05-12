@@ -153,4 +153,8 @@ reveal `local_encrypted` records. `record reveal` decrypts a local encrypted
 record, verifies the decrypted artifact hash against the record, and prints the
 artifact.
 
+`vault inventory` summarizes local holdings without decrypting artifacts. It
+groups record counts by artifact type, custody mode, and privacy class, and
+reports whether each `local_encrypted` record has its encrypted blob present.
+
 Schema: `contracts/schemas/cred-agent.schema.json`.

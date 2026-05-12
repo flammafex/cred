@@ -68,6 +68,7 @@ cargo run -p cred-cli -- --store ./tmp/cred-store witness import examples/witnes
   --cred-id cred:local:example
 cargo run -p cred-cli -- --store ./tmp/cred-store record list
 cargo run -p cred-cli -- --store ./tmp/cred-store record get record-witness-attestation-1
+cargo run -p cred-cli -- --store ./tmp/cred-store vault inventory
 cargo run -p cred-cli -- --store ./tmp/cred-store record add examples/witness-signed-attestation.json \
   --record-id record-vault-witness-1 \
   --cred-id cred:local:example \
