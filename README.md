@@ -43,7 +43,7 @@ The schema lives at `contracts/schemas/cred-agent.schema.json`.
 | Path | Purpose |
 | --- | --- |
 | `crates/cred-core` | Cred v1 artifact types, validation, canonical JSON, and SHA-256 hashing. |
-| `crates/cred-store` | Durable local JSONL store for `cred.artifact_record` metadata. |
+| `crates/cred-store` | Durable local JSONL store for records, imported grants, and presentation audit metadata. |
 | `crates/cred-cli` | `cred` command-line interface. |
 | `contracts/` | Standalone Cred contract files. |
 | `docs/` | Human-readable protocol notes. |
@@ -83,6 +83,9 @@ cargo run -p cred-cli -- --store ./tmp/cred-store record reveal record-vault-wit
 cargo run -p cred-cli -- grant check \
   --grant examples/permission-grant.json \
   --request examples/action-request.json
+cargo run -p cred-cli -- --store ./tmp/cred-store grant import examples/witness-permission-grant.json
+cargo run -p cred-cli -- --store ./tmp/cred-store grant list
+cargo run -p cred-cli -- --store ./tmp/cred-store grant get grant-witness-attestation-1
 
 cargo run -p cred-cli -- --store ./tmp/cred-store witness present \
   --request examples/witness-presentation-request.json \
@@ -137,6 +140,7 @@ Cred must not:
 - turn one controller key into a universal identity.
 - publish private keys, Matchlock secrets, or unspent credentials.
 - store plaintext artifacts in durable vault blobs.
+- put raw proof material in grant or presentation audit records.
 - treat HyperToken peer identity as authority.
 - make app-local claims trustworthy without app payload signatures or proofs.
 - silently grant unknown capabilities.
@@ -152,6 +156,8 @@ The first implementation is deliberately small:
 5. Enforce `cred.permission_grant` constraints for an action request.
 6. Return a signed or unsigned `cred.presentation` for embedded or referenced
    artifacts.
+7. Track imported grants and successful presentations as metadata-only local
+   audit records.
 
 That is enough to prove the app boundary before adding app-facing service
 transport, Freebird issuance, Witness timestamping, or Matchlock derivation.

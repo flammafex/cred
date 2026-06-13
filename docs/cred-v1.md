@@ -157,4 +157,24 @@ artifact.
 groups record counts by artifact type, custody mode, and privacy class, and
 reports whether each `local_encrypted` record has its encrypted blob present.
 
+The v1 local store also writes two metadata-only audit indexes:
+
+- `grants.jsonl`: imported permission grants represented as
+  `cred.stored_grant` summaries. Each entry stores the grant id, app id,
+  granted capabilities, constraints, source URI, timestamps, and the canonical
+  hash of the original `cred.permission_grant`.
+- `presentation_audit.jsonl`: successful presentation events represented as
+  `cred.presentation_audit` summaries. Each entry stores the presentation id,
+  request id, app id, optional grant id, presentation hash, presented artifact
+  hashes, referenced record ids, and disclosure modes.
+
+These audit files do not contain decrypted artifacts, embedded raw proof
+material, local private keys, or vault passphrases. They answer inventory
+questions such as "who has access?" and "what have I disclosed?" while keeping
+artifact custody separate from authorization and disclosure history.
+
+`vault inventory` includes those imported grants and successful presentation
+audit entries alongside holdings, so the inventory can be generated without
+decrypting local encrypted blobs.
+
 Schema: `contracts/schemas/cred-agent.schema.json`.

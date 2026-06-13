@@ -6,7 +6,7 @@ use cred_core::{
     verify_presentation_signature, CredActionRequest, CredEndpoint, CredPermissionGrant,
     CredPresentation, GrantUsage, PresentedArtifact,
 };
-use cred_store::RecordStore;
+use cred_store::{PresentationAuditEntry, RecordStore, StoredGrant};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -115,6 +115,12 @@ enum VaultCommand {
 
 #[derive(Debug, Subcommand)]
 enum GrantCommand {
+    /// Import a cred.permission_grant into the local store.
+    Import(GrantImportCommand),
+    /// List stored permission grants.
+    List,
+    /// Get one stored permission grant by ID.
+    Get(GrantGetCommand),
     /// Check whether a cred.action_request is allowed by a cred.permission_grant.
     Check(GrantCheckCommand),
 }
@@ -326,6 +332,18 @@ struct RecordRevealCommand {
 }
 
 #[derive(Debug, Args)]
+struct GrantImportCommand {
+    grant: PathBuf,
+    #[arg(long)]
+    source_uri: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct GrantGetCommand {
+    grant_id: String,
+}
+
+#[derive(Debug, Args)]
 struct PresentCommand {
     #[arg(long)]
     request: PathBuf,
@@ -374,9 +392,7 @@ fn main() -> Result<()> {
         Command::Matchlock { command } => matchlock(command, store),
         Command::Record { command } => record(command, store),
         Command::Vault { command } => vault(command, store),
-        Command::Grant {
-            command: GrantCommand::Check(command),
-        } => grant_check(command),
+        Command::Grant { command } => grant(command, store),
         Command::Present(command) => present(command, store),
     }
 }
@@ -1086,9 +1102,14 @@ fn vault(command: VaultCommand, store_path: Option<PathBuf>) -> Result<()> {
 fn vault_inventory(store_path: Option<PathBuf>) -> Result<()> {
     let store = record_store(store_path)?;
     let records = store.list_records()?;
+    let grants = store.list_grants()?;
+    let presentations = store.list_presentation_audit()?;
     let mut artifact_types = BTreeMap::new();
     let mut custody = BTreeMap::new();
     let mut privacy = BTreeMap::new();
+    let mut grant_apps = BTreeMap::new();
+    let mut presentation_apps = BTreeMap::new();
+    let mut disclosure_modes = BTreeMap::new();
     let mut holdings = Vec::with_capacity(records.len());
     let mut local_encrypted_present = 0_u64;
     let mut local_encrypted_missing = 0_u64;
@@ -1123,19 +1144,36 @@ fn vault_inventory(store_path: Option<PathBuf>) -> Result<()> {
         });
     }
 
+    for grant in &grants {
+        increment_count(&mut grant_apps, &grant.app_id);
+    }
+    for presentation in &presentations {
+        increment_count(&mut presentation_apps, &presentation.app_id);
+        for artifact in &presentation.artifacts {
+            increment_count(&mut disclosure_modes, &artifact.disclosure);
+        }
+    }
+
     let inventory = VaultInventory {
         contract_version: "sophia/v1",
         artifact_type: "cred.vault_inventory",
         store_root: store.root().display().to_string(),
         total_records: holdings.len() as u64,
+        total_grants: grants.len() as u64,
+        total_presentations: presentations.len() as u64,
         artifact_types,
         custody,
         privacy,
+        grant_apps,
+        presentation_apps,
+        disclosure_modes,
         local_encrypted: LocalEncryptedSummary {
             present: local_encrypted_present,
             missing: local_encrypted_missing,
         },
         holdings,
+        grants,
+        presentations,
     };
     print_json(&inventory)
 }
@@ -1146,11 +1184,18 @@ struct VaultInventory {
     artifact_type: &'static str,
     store_root: String,
     total_records: u64,
+    total_grants: u64,
+    total_presentations: u64,
     artifact_types: BTreeMap<String, u64>,
     custody: BTreeMap<String, u64>,
     privacy: BTreeMap<String, u64>,
+    grant_apps: BTreeMap<String, u64>,
+    presentation_apps: BTreeMap<String, u64>,
+    disclosure_modes: BTreeMap<String, u64>,
     local_encrypted: LocalEncryptedSummary,
     holdings: Vec<InventoryHolding>,
+    grants: Vec<StoredGrant>,
+    presentations: Vec<PresentationAuditEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1225,6 +1270,48 @@ fn increment_count(counts: &mut BTreeMap<String, u64>, key: &str) {
     *counts.entry(key.to_owned()).or_insert(0) += 1;
 }
 
+fn grant(command: GrantCommand, store_path: Option<PathBuf>) -> Result<()> {
+    match command {
+        GrantCommand::Import(command) => grant_import(command, store_path),
+        GrantCommand::List => grant_list(store_path),
+        GrantCommand::Get(command) => grant_get(command, store_path),
+        GrantCommand::Check(command) => grant_check(command),
+    }
+}
+
+fn grant_import(command: GrantImportCommand, store_path: Option<PathBuf>) -> Result<()> {
+    let value = read_json(&command.grant)?;
+    let grant: CredPermissionGrant =
+        serde_json::from_value(value.clone()).context("grant must be a cred.permission_grant")?;
+    grant.validate()?;
+    let grant_hash = canonical_hash_hex(&value)?;
+    let source_uri = command
+        .source_uri
+        .or_else(|| Some(command.grant.display().to_string()));
+    let stored = StoredGrant::from_grant(&grant, grant_hash, source_uri, now_unix()?);
+    let store = record_store(store_path)?;
+    store.append_grant(&stored)?;
+    print_json(&stored)
+}
+
+fn grant_list(store_path: Option<PathBuf>) -> Result<()> {
+    let grants = record_store(store_path)?.list_grants()?;
+    let summary = serde_json::json!({
+        "contract_version": "sophia/v1",
+        "artifact_type": "cred.grant_list",
+        "grants": grants
+    });
+    print_json(&summary)
+}
+
+fn grant_get(command: GrantGetCommand, store_path: Option<PathBuf>) -> Result<()> {
+    let store = record_store(store_path)?;
+    let Some(grant) = store.get_grant(&command.grant_id)? else {
+        bail!("grant not found: {}", command.grant_id);
+    };
+    print_json(&grant)
+}
+
 fn grant_check(command: GrantCheckCommand) -> Result<()> {
     let grant: CredPermissionGrant = serde_json::from_value(read_json(&command.grant)?)
         .context("grant must be a cred.permission_grant artifact")?;
@@ -1261,7 +1348,7 @@ fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
         .context("request must be a cred.action_request artifact")?;
     request.validate()?;
 
-    let source = presentation_source(&command, store_path)?;
+    let source = presentation_source(&command, store_path.clone())?;
     ensure_request_allows_artifact(&request, &source.artifact_type)?;
 
     if let Some(grant_path) = &command.grant {
@@ -1307,6 +1394,10 @@ fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
         presentation = sign_presentation(presentation, &secret_key)?;
         verify_presentation_signature(&presentation)?;
     }
+    let presentation_value = serde_json::to_value(&presentation)?;
+    let presentation_hash = canonical_hash_hex(&presentation_value)?;
+    let audit = PresentationAuditEntry::from_presentation(&presentation, presentation_hash);
+    record_store(store_path)?.append_presentation_audit(&audit)?;
     print_json(&presentation)
 }
 

@@ -2,8 +2,12 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     Key, XChaCha20Poly1305, XNonce,
 };
-use cred_core::{artifact_type, canonical_hash_hex, canonical_json, CredArtifactRecord};
+use cred_core::{
+    artifact_type, canonical_hash_hex, canonical_json, CredArtifactRecord, CredPermissionGrant,
+    CredPresentation,
+};
 use scrypt::{scrypt, Params};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::env;
@@ -15,6 +19,8 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroize;
 
 const RECORDS_FILE: &str = "records.jsonl";
+const GRANTS_FILE: &str = "grants.jsonl";
+const PRESENTATION_AUDIT_FILE: &str = "presentation_audit.jsonl";
 const BLOBS_DIR: &str = "blobs";
 const BLOB_URI_PREFIX: &str = "cred-vault://blobs/";
 const BLOB_ARTIFACT_TYPE: &str = "cred.encrypted_artifact_blob";
@@ -41,6 +47,10 @@ pub enum StoreError {
     Encode(#[source] serde_json::Error),
     #[error("record already exists: {0}")]
     DuplicateRecord(String),
+    #[error("grant already exists: {0}")]
+    DuplicateGrant(String),
+    #[error("presentation audit entry already exists: {0}")]
+    DuplicatePresentation(String),
     #[error("HOME is not set; pass --store")]
     MissingHome,
     #[error("encrypted artifact requires local_encrypted custody")]
@@ -69,6 +79,61 @@ pub enum StoreError {
 #[derive(Debug, Clone)]
 pub struct RecordStore {
     root: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StoredGrant {
+    pub contract_version: String,
+    pub artifact_type: String,
+    pub grant_id: String,
+    pub cred_id: String,
+    pub app_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_pubkey: Option<String>,
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_audiences: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_artifact_types: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_uses: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_export: Option<bool>,
+    pub human_approval: String,
+    pub grant_hash: String,
+    pub created_at: u64,
+    pub imported_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PresentationAuditEntry {
+    pub contract_version: String,
+    pub artifact_type: String,
+    pub presentation_id: String,
+    pub presentation_hash: String,
+    pub cred_id: String,
+    pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    pub app_id: String,
+    pub presented_at: u64,
+    pub artifacts: Vec<PresentationAuditArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PresentationAuditArtifact {
+    pub artifact_type: String,
+    pub artifact_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
+    pub disclosure: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -164,6 +229,44 @@ impl RecordStore {
             .list_records()?
             .into_iter()
             .find(|record| record.record_id == record_id))
+    }
+
+    pub fn append_grant(&self, grant: &StoredGrant) -> Result<(), StoreError> {
+        if self.get_grant(&grant.grant_id)?.is_some() {
+            return Err(StoreError::DuplicateGrant(grant.grant_id.clone()));
+        }
+        self.append_json_line(self.grants_path(), grant)
+    }
+
+    pub fn list_grants(&self) -> Result<Vec<StoredGrant>, StoreError> {
+        self.read_json_lines(self.grants_path())
+    }
+
+    pub fn get_grant(&self, grant_id: &str) -> Result<Option<StoredGrant>, StoreError> {
+        Ok(self
+            .list_grants()?
+            .into_iter()
+            .find(|grant| grant.grant_id == grant_id))
+    }
+
+    pub fn append_presentation_audit(
+        &self,
+        entry: &PresentationAuditEntry,
+    ) -> Result<(), StoreError> {
+        if self
+            .list_presentation_audit()?
+            .into_iter()
+            .any(|candidate| candidate.presentation_id == entry.presentation_id)
+        {
+            return Err(StoreError::DuplicatePresentation(
+                entry.presentation_id.clone(),
+            ));
+        }
+        self.append_json_line(self.presentation_audit_path(), entry)
+    }
+
+    pub fn list_presentation_audit(&self) -> Result<Vec<PresentationAuditEntry>, StoreError> {
+        self.read_json_lines(self.presentation_audit_path())
     }
 
     pub fn write_encrypted_artifact(
@@ -342,6 +445,104 @@ impl RecordStore {
     fn records_path(&self) -> PathBuf {
         self.root.join(RECORDS_FILE)
     }
+
+    fn grants_path(&self) -> PathBuf {
+        self.root.join(GRANTS_FILE)
+    }
+
+    fn presentation_audit_path(&self) -> PathBuf {
+        self.root.join(PRESENTATION_AUDIT_FILE)
+    }
+
+    fn append_json_line<T: Serialize>(&self, path: PathBuf, value: &T) -> Result<(), StoreError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        serde_json::to_writer(&mut file, value).map_err(StoreError::Encode)?;
+        file.write_all(b"\n")?;
+        Ok(())
+    }
+
+    fn read_json_lines<T: DeserializeOwned>(&self, path: PathBuf) -> Result<Vec<T>, StoreError> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut values = Vec::new();
+
+        for (index, line) in reader.lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            values.push(
+                serde_json::from_str(&line).map_err(|source| StoreError::Json {
+                    line: index + 1,
+                    source,
+                })?,
+            );
+        }
+
+        Ok(values)
+    }
+}
+
+impl StoredGrant {
+    pub fn from_grant(
+        grant: &CredPermissionGrant,
+        grant_hash: String,
+        source_uri: Option<String>,
+        imported_at: u64,
+    ) -> Self {
+        Self {
+            contract_version: "sophia/v1".to_owned(),
+            artifact_type: "cred.stored_grant".to_owned(),
+            grant_id: grant.grant_id.clone(),
+            cred_id: grant.cred_id.clone(),
+            app_id: grant.app_id.clone(),
+            app_pubkey: grant.app_pubkey.clone(),
+            capabilities: grant.capabilities.clone(),
+            allowed_audiences: grant.constraints.allowed_audiences.clone(),
+            allowed_artifact_types: grant.constraints.allowed_artifact_types.clone(),
+            max_uses: grant.constraints.max_uses,
+            expires_at: grant.constraints.expires_at,
+            allow_export: grant.constraints.allow_export,
+            human_approval: grant.human_approval.clone(),
+            grant_hash,
+            created_at: grant.created_at,
+            imported_at,
+            source_uri,
+        }
+    }
+}
+
+impl PresentationAuditEntry {
+    pub fn from_presentation(presentation: &CredPresentation, presentation_hash: String) -> Self {
+        Self {
+            contract_version: "sophia/v1".to_owned(),
+            artifact_type: "cred.presentation_audit".to_owned(),
+            presentation_id: presentation.presentation_id.clone(),
+            presentation_hash,
+            cred_id: presentation.cred_id.clone(),
+            request_id: presentation.request_id.clone(),
+            grant_id: presentation.grant_id.clone(),
+            app_id: presentation.app_id.clone(),
+            presented_at: presentation.created_at,
+            artifacts: presentation
+                .artifacts
+                .iter()
+                .map(|artifact| PresentationAuditArtifact {
+                    artifact_type: artifact.artifact_type.clone(),
+                    artifact_hash: artifact.artifact_hash.clone(),
+                    record_id: artifact.record_id.clone(),
+                    disclosure: artifact.disclosure.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 fn scrypt_params() -> Result<Params, StoreError> {
@@ -399,7 +600,7 @@ fn decode_blob_hex(value: &str, field: &'static str) -> Result<Vec<u8>, StoreErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cred_core::artifact_record;
+    use cred_core::{artifact_record, CredGrantConstraints, PresentedArtifact};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -428,6 +629,76 @@ mod tests {
         let err = store.append_record(&record).unwrap_err();
 
         assert!(matches!(err, StoreError::DuplicateRecord(id) if id == "record-1"));
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn appends_lists_and_gets_grants() {
+        let root = temp_store_root("grants");
+        let store = RecordStore::new(&root);
+        let grant = sample_grant();
+        let grant_hash = canonical_hash_hex(&serde_json::to_value(&grant).unwrap()).unwrap();
+        let stored = StoredGrant::from_grant(
+            &grant,
+            grant_hash.clone(),
+            Some("examples/permission-grant.json".to_owned()),
+            2,
+        );
+
+        store.append_grant(&stored).unwrap();
+
+        assert_eq!(store.list_grants().unwrap(), vec![stored.clone()]);
+        assert_eq!(store.get_grant("grant-1").unwrap(), Some(stored.clone()));
+        assert_eq!(store.get_grant("missing").unwrap(), None);
+        assert_eq!(stored.grant_hash, grant_hash);
+        assert_eq!(
+            stored.allowed_artifact_types.as_deref(),
+            Some(&["witness.signed_attestation".to_owned()][..])
+        );
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn rejects_duplicate_grant_ids() {
+        let root = temp_store_root("duplicate-grants");
+        let store = RecordStore::new(&root);
+        let grant = sample_grant();
+        let stored = StoredGrant::from_grant(
+            &grant,
+            canonical_hash_hex(&serde_json::to_value(&grant).unwrap()).unwrap(),
+            None,
+            2,
+        );
+
+        store.append_grant(&stored).unwrap();
+        let err = store.append_grant(&stored).unwrap_err();
+
+        assert!(matches!(err, StoreError::DuplicateGrant(id) if id == "grant-1"));
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn appends_lists_and_rejects_duplicate_presentation_audit_entries() {
+        let root = temp_store_root("presentation-audit");
+        let store = RecordStore::new(&root);
+        let presentation = sample_presentation();
+        let presentation_hash =
+            canonical_hash_hex(&serde_json::to_value(&presentation).unwrap()).unwrap();
+        let entry = PresentationAuditEntry::from_presentation(&presentation, presentation_hash);
+
+        store.append_presentation_audit(&entry).unwrap();
+
+        assert_eq!(
+            store.list_presentation_audit().unwrap(),
+            vec![entry.clone()]
+        );
+        assert_eq!(entry.artifacts[0].record_id.as_deref(), Some("record-1"));
+        assert_eq!(entry.artifacts[0].disclosure, "reference");
+        let err = store.append_presentation_audit(&entry).unwrap_err();
+        assert!(matches!(err, StoreError::DuplicatePresentation(id) if id == "presentation-1"));
 
         cleanup(root);
     }
@@ -552,6 +823,50 @@ mod tests {
                 ]
             }
         })
+    }
+
+    fn sample_grant() -> CredPermissionGrant {
+        CredPermissionGrant {
+            contract_version: "sophia/v1".to_owned(),
+            artifact_type: "cred.permission_grant".to_owned(),
+            grant_id: "grant-1".to_owned(),
+            cred_id: "cred:local:test".to_owned(),
+            app_id: "app:prestige:test".to_owned(),
+            app_pubkey: None,
+            capabilities: vec!["witness.present_attestation".to_owned()],
+            constraints: CredGrantConstraints {
+                allowed_audiences: Some(vec!["prestige".to_owned()]),
+                allowed_artifact_types: Some(vec!["witness.signed_attestation".to_owned()]),
+                max_uses: Some(3),
+                expires_at: Some(4_102_444_800),
+                allow_export: Some(false),
+            },
+            human_approval: "per_use".to_owned(),
+            created_at: 1,
+            cred_signature: None,
+        }
+    }
+
+    fn sample_presentation() -> CredPresentation {
+        CredPresentation {
+            contract_version: "sophia/v1".to_owned(),
+            artifact_type: "cred.presentation".to_owned(),
+            presentation_id: "presentation-1".to_owned(),
+            cred_id: "cred:local:test".to_owned(),
+            request_id: "request-1".to_owned(),
+            grant_id: Some("grant-1".to_owned()),
+            app_id: "app:prestige:test".to_owned(),
+            created_at: 3,
+            artifacts: vec![PresentedArtifact {
+                artifact_type: "witness.signed_attestation".to_owned(),
+                artifact_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_owned(),
+                record_id: Some("record-1".to_owned()),
+                disclosure: "reference".to_owned(),
+                artifact: None,
+            }],
+            cred_signature: None,
+        }
     }
 
     fn temp_store_root(name: &str) -> PathBuf {
