@@ -138,6 +138,49 @@ Presented artifacts use one of three disclosure modes:
 - `redacted`: the presentation proves or acknowledges existence without
   revealing the artifact.
 
+## Stdio Service
+
+`cred serve stdio` runs a local newline-delimited JSON service over
+stdin/stdout. Each input line is one request:
+
+```json
+{"id":"1","method":"cred.service_info","params":{}}
+```
+
+Each output line is one `cred.service_response`:
+
+```json
+{"contract_version":"sophia/v1","artifact_type":"cred.service_response","id":"1","ok":true,"result":{}}
+```
+
+The stdio service is intentionally local and process-scoped. It does not open a
+network listener, does not bypass local grant approval rules, and does not
+consume Freebird tokens or derive Matchlock secrets. It accepts JSON artifacts
+directly so apps can request Cred work without shelling out to individual CLI
+commands or relying on temporary files.
+
+Initial methods:
+
+- `cred.service_info`: advertise stdio service capabilities and store root.
+- `cred.vault_inventory`: return the same metadata-only inventory as
+  `cred vault inventory`.
+- `cred.grant_review`: review a supplied `cred.permission_grant` JSON object.
+- `cred.grant_import`: import a supplied `cred.permission_grant` summary into
+  the local store.
+- `cred.grant_approve`: approve an exact supplied permission-grant hash.
+- `cred.grant_deny`: deny an exact supplied permission-grant hash.
+- `cred.grant_approvals`: list local approval and denial records.
+- `cred.present`: produce a `cred.presentation` from a supplied
+  `cred.action_request`, a supplied artifact or stored record id, and an
+  optional supplied `cred.permission_grant`.
+
+`cred.present` signs by default with `$CRED_STORE_DIR/controller_sk.hex` or the
+store-local `controller_sk.hex`; callers can set `sign: false` or provide
+`signing_key`. When `grant` is supplied, the latest local decision for that
+exact grant hash must be approved, exactly as in the CLI presentation flow.
+Successful service presentations append the same presentation audit records as
+CLI presentations.
+
 ## Storage Rules
 
 `cred.artifact_record` is metadata. It may contain hashes, labels, source app,

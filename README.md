@@ -133,6 +133,8 @@ cargo run -p cred-cli -- present \
   --artifact examples/manifest.json \
   --presentation-id presentation-smoke-1 \
   --cred-id cred:local:example
+
+cargo run -p cred-cli -- --store ./tmp/cred-store serve stdio
 ```
 
 Witness adapter smoke:
@@ -142,6 +144,7 @@ Witness adapter smoke:
 ./scripts/freebird-adapter-smoke.sh
 ./scripts/matchlock-adapter-smoke.sh
 ./scripts/vault-smoke.sh
+./scripts/stdio-service-smoke.sh
 ```
 
 ## Non-Goals
@@ -171,6 +174,8 @@ The first implementation is deliberately small:
    audit records.
 8. Require an explicit local approval for the exact permission-grant hash
    before presenting under that grant.
+9. Expose the same review, approval, inventory, and presentation paths through
+   a minimal stdio JSONL service.
 
-That is enough to prove the app boundary before adding app-facing service
-transport, Freebird issuance, Witness timestamping, or Matchlock derivation.
+That is enough to prove the app boundary before adding HTTP service transport,
+Freebird issuance, Witness timestamping, or Matchlock derivation.

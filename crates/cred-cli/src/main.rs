@@ -7,11 +7,12 @@ use cred_core::{
     CredPresentation, GrantUsage, PresentedArtifact,
 };
 use cred_store::{GrantApproval, PresentationAuditEntry, RecordStore, StoredGrant};
-use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, BufRead, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -74,6 +75,11 @@ enum Command {
     },
     /// Build a cred.presentation from a request and artifact or stored record.
     Present(PresentCommand),
+    /// Run Cred as a local app-facing service.
+    Serve {
+        #[command(subcommand)]
+        command: ServeCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -165,6 +171,12 @@ enum MatchlockCommand {
     ImportArtifact(MatchlockImportArtifactCommand),
     /// Present an imported Matchlock artifact by reference.
     PresentArtifact(MatchlockPresentArtifactCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum ServeCommand {
+    /// Serve newline-delimited JSON requests over stdin/stdout.
+    Stdio,
 }
 
 #[derive(Debug, Args)]
@@ -435,7 +447,252 @@ fn main() -> Result<()> {
         Command::Vault { command } => vault(command, store),
         Command::Grant { command } => grant(command, store),
         Command::Present(command) => present(command, store),
+        Command::Serve { command } => serve(command, store),
     }
+}
+
+fn serve(command: ServeCommand, store_path: Option<PathBuf>) -> Result<()> {
+    match command {
+        ServeCommand::Stdio => serve_stdio(store_path),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceRequest {
+    #[serde(default)]
+    id: Value,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceGrantParams {
+    grant: Value,
+    source_uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceGrantDecisionParams {
+    grant: Value,
+    approval_id: String,
+    reviewer: Option<String>,
+    note: Option<String>,
+    source_uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServicePresentParams {
+    request: Value,
+    artifact: Option<Value>,
+    record_id: Option<String>,
+    grant: Option<Value>,
+    approval_id: Option<String>,
+    signing_key: Option<PathBuf>,
+    sign: Option<bool>,
+    uses_so_far: Option<u64>,
+    now: Option<u64>,
+    presentation_id: String,
+    cred_id: String,
+    disclosure: Option<String>,
+}
+
+fn serve_stdio(store_path: Option<PathBuf>) -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let response = match serde_json::from_str::<ServiceRequest>(&line) {
+            Ok(request) => {
+                let id = request.id.clone();
+                service_response(
+                    id,
+                    handle_service_request(request, store_path.clone())
+                        .with_context(|| format!("service method failed")),
+                )
+            }
+            Err(error) => service_response(
+                Value::Null,
+                Err(anyhow::anyhow!("invalid service request JSON: {error}")),
+            ),
+        };
+        serde_json::to_writer(&mut stdout, &response)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+    }
+
+    Ok(())
+}
+
+fn service_response(id: Value, result: Result<Value>) -> Value {
+    match result {
+        Ok(result) => serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "cred.service_response",
+            "id": id,
+            "ok": true,
+            "result": result
+        }),
+        Err(error) => serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "cred.service_response",
+            "id": id,
+            "ok": false,
+            "error": {
+                "message": format!("{error:#}")
+            }
+        }),
+    }
+}
+
+fn handle_service_request(request: ServiceRequest, store_path: Option<PathBuf>) -> Result<Value> {
+    match request.method.as_str() {
+        "cred.service_info" => service_info(store_path),
+        "cred.vault_inventory" => to_json_value(vault_inventory_value(store_path)?),
+        "cred.grant_review" => service_grant_review(request.params),
+        "cred.grant_import" => service_grant_import(request.params, store_path),
+        "cred.grant_approve" => service_grant_decision(request.params, store_path, "approved"),
+        "cred.grant_deny" => service_grant_decision(request.params, store_path, "denied"),
+        "cred.grant_approvals" => {
+            let approvals = record_store(store_path)?.list_grant_approvals()?;
+            to_json_value(serde_json::json!({
+                "contract_version": "sophia/v1",
+                "artifact_type": "cred.grant_approval_list",
+                "approvals": approvals
+            }))
+        }
+        "cred.present" => service_present(request.params, store_path),
+        other => bail!("unsupported service method: {other}"),
+    }
+}
+
+fn service_info(store_path: Option<PathBuf>) -> Result<Value> {
+    let store = record_store(store_path)?;
+    Ok(serde_json::json!({
+        "contract_version": "sophia/v1",
+        "artifact_type": "cred.service_info",
+        "transport": "stdio",
+        "store_root": store.root().display().to_string(),
+        "methods": [
+            "cred.service_info",
+            "cred.vault_inventory",
+            "cred.grant_review",
+            "cred.grant_import",
+            "cred.grant_approve",
+            "cred.grant_deny",
+            "cred.grant_approvals",
+            "cred.present"
+        ],
+        "presentation_signing_default": true
+    }))
+}
+
+fn service_grant_review(params: Value) -> Result<Value> {
+    let params: ServiceGrantParams = service_params(params)?;
+    let (grant, grant_hash) = parse_grant_with_hash(params.grant)?;
+    Ok(grant_review_value(&grant, grant_hash))
+}
+
+fn service_grant_import(params: Value, store_path: Option<PathBuf>) -> Result<Value> {
+    let params: ServiceGrantParams = service_params(params)?;
+    let (grant, grant_hash) = parse_grant_with_hash(params.grant)?;
+    to_json_value(import_grant(
+        &grant,
+        grant_hash,
+        params.source_uri,
+        store_path,
+    )?)
+}
+
+fn service_grant_decision(
+    params: Value,
+    store_path: Option<PathBuf>,
+    decision: &'static str,
+) -> Result<Value> {
+    let params: ServiceGrantDecisionParams = service_params(params)?;
+    let (grant, grant_hash) = parse_grant_with_hash(params.grant)?;
+    to_json_value(decide_grant(
+        &grant,
+        grant_hash,
+        decision,
+        params.approval_id,
+        params.reviewer,
+        params.note,
+        params.source_uri,
+        store_path,
+    )?)
+}
+
+fn service_present(params: Value, store_path: Option<PathBuf>) -> Result<Value> {
+    let params: ServicePresentParams = service_params(params)?;
+    let request = parse_action_request(params.request)?;
+    let source = service_presentation_source(
+        params.artifact,
+        params.record_id,
+        &params.cred_id,
+        params.disclosure.as_deref(),
+        store_path.clone(),
+    )?;
+    let grant = params.grant.map(parse_grant_with_hash).transpose()?;
+    let signing_key = if params.sign.unwrap_or(true) {
+        Some(match params.signing_key {
+            Some(path) => path,
+            None => controller_secret_key_path(None, store_path.clone())?,
+        })
+    } else {
+        None
+    };
+
+    to_json_value(build_presentation(PresentationBuild {
+        request,
+        source,
+        grant,
+        approval_id: params.approval_id,
+        signing_key,
+        uses_so_far: params.uses_so_far.unwrap_or(0),
+        now: params.now,
+        presentation_id: params.presentation_id,
+        cred_id: params.cred_id,
+        store_path,
+    })?)
+}
+
+fn service_presentation_source(
+    artifact: Option<Value>,
+    record_id: Option<String>,
+    cred_id: &str,
+    disclosure: Option<&str>,
+    store_path: Option<PathBuf>,
+) -> Result<PresentationSource> {
+    match (artifact, record_id) {
+        (Some(_), Some(_)) => bail!("params must include either artifact or record_id, not both"),
+        (None, None) => bail!("params must include either artifact or record_id"),
+        (Some(artifact), None) => presentation_source_from_value(artifact, disclosure),
+        (None, Some(record_id)) => {
+            let store = record_store(store_path)?;
+            let Some(record) = store.get_record(&record_id)? else {
+                bail!("record not found: {record_id}");
+            };
+            ensure!(
+                record.cred_id == cred_id,
+                "record cred_id does not match presentation cred_id"
+            );
+            presentation_source_from_record(record, disclosure)
+        }
+    }
+}
+
+fn service_params<T: DeserializeOwned>(params: Value) -> Result<T> {
+    serde_json::from_value(params).context("invalid service params")
+}
+
+fn to_json_value<T: Serialize>(value: T) -> Result<Value> {
+    serde_json::to_value(value).context("encode service result")
 }
 
 fn print_manifest(command: ManifestCommand) -> Result<()> {
@@ -1144,6 +1401,11 @@ fn vault(command: VaultCommand, store_path: Option<PathBuf>) -> Result<()> {
 }
 
 fn vault_inventory(store_path: Option<PathBuf>) -> Result<()> {
+    let inventory = vault_inventory_value(store_path)?;
+    print_json(&inventory)
+}
+
+fn vault_inventory_value(store_path: Option<PathBuf>) -> Result<VaultInventory> {
     let store = record_store(store_path)?;
     let records = store.list_records()?;
     let grants = store.list_grants()?;
@@ -1227,7 +1489,7 @@ fn vault_inventory(store_path: Option<PathBuf>) -> Result<()> {
         grant_approvals,
         presentations,
     };
-    print_json(&inventory)
+    Ok(inventory)
 }
 
 #[derive(Debug, Serialize)]
@@ -1341,9 +1603,14 @@ fn grant(command: GrantCommand, store_path: Option<PathBuf>) -> Result<()> {
 
 fn grant_review(command: GrantReviewCommand) -> Result<()> {
     let (grant, grant_hash) = read_grant_with_hash(&command.grant)?;
-    let summary = grant_review_summary(&grant);
-    let warnings = grant_review_warnings(&grant);
-    let review = serde_json::json!({
+    let review = grant_review_value(&grant, grant_hash);
+    print_json(&review)
+}
+
+fn grant_review_value(grant: &CredPermissionGrant, grant_hash: String) -> Value {
+    let summary = grant_review_summary(grant);
+    let warnings = grant_review_warnings(grant);
+    serde_json::json!({
         "contract_version": "sophia/v1",
         "artifact_type": "cred.grant_review",
         "grant_id": grant.grant_id,
@@ -1357,8 +1624,7 @@ fn grant_review(command: GrantReviewCommand) -> Result<()> {
         "created_at": grant.created_at,
         "summary": summary,
         "warnings": warnings
-    });
-    print_json(&review)
+    })
 }
 
 fn grant_import(command: GrantImportCommand, store_path: Option<PathBuf>) -> Result<()> {
@@ -1366,10 +1632,20 @@ fn grant_import(command: GrantImportCommand, store_path: Option<PathBuf>) -> Res
     let source_uri = command
         .source_uri
         .or_else(|| Some(command.grant.display().to_string()));
-    let stored = StoredGrant::from_grant(&grant, grant_hash, source_uri, now_unix()?);
+    let stored = import_grant(&grant, grant_hash, source_uri, store_path)?;
+    print_json(&stored)
+}
+
+fn import_grant(
+    grant: &CredPermissionGrant,
+    grant_hash: String,
+    source_uri: Option<String>,
+    store_path: Option<PathBuf>,
+) -> Result<StoredGrant> {
+    let stored = StoredGrant::from_grant(grant, grant_hash, source_uri, now_unix()?);
     let store = record_store(store_path)?;
     store.append_grant(&stored)?;
-    print_json(&stored)
+    Ok(stored)
 }
 
 fn grant_decision(
@@ -1381,21 +1657,45 @@ fn grant_decision(
     let source_uri = command
         .source_uri
         .or_else(|| Some(command.grant.display().to_string()));
-    let approval = GrantApproval::from_grant(
+    let approval = decide_grant(
         &grant,
         grant_hash,
-        decision.to_owned(),
+        decision,
         command.approval_id,
-        grant_review_summary(&grant),
-        grant_review_warnings(&grant),
         command.reviewer,
         command.note,
+        source_uri,
+        store_path,
+    );
+    let approval = approval?;
+    print_json(&approval)
+}
+
+fn decide_grant(
+    grant: &CredPermissionGrant,
+    grant_hash: String,
+    decision: &'static str,
+    approval_id: String,
+    reviewer: Option<String>,
+    note: Option<String>,
+    source_uri: Option<String>,
+    store_path: Option<PathBuf>,
+) -> Result<GrantApproval> {
+    let approval = GrantApproval::from_grant(
+        grant,
+        grant_hash,
+        decision.to_owned(),
+        approval_id,
+        grant_review_summary(grant),
+        grant_review_warnings(grant),
+        reviewer,
+        note,
         source_uri,
         now_unix()?,
     );
     let store = record_store(store_path)?;
     store.append_grant_approval(&approval)?;
-    print_json(&approval)
+    Ok(approval)
 }
 
 fn grant_list(store_path: Option<PathBuf>) -> Result<()> {
@@ -1436,6 +1736,10 @@ fn grant_get(command: GrantGetCommand, store_path: Option<PathBuf>) -> Result<()
 
 fn read_grant_with_hash(path: &PathBuf) -> Result<(CredPermissionGrant, String)> {
     let value = read_json(path)?;
+    parse_grant_with_hash(value)
+}
+
+fn parse_grant_with_hash(value: Value) -> Result<(CredPermissionGrant, String)> {
     let grant: CredPermissionGrant =
         serde_json::from_value(value.clone()).context("grant must be a cred.permission_grant")?;
     grant.validate()?;
@@ -1540,36 +1844,69 @@ fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
         command.grant.is_some() || command.approval_id.is_none(),
         "--approval-id requires --grant"
     );
-    let request_value = read_json(&command.request)?;
-    let request: CredActionRequest = serde_json::from_value(request_value)
-        .context("request must be a cred.action_request artifact")?;
-    request.validate()?;
-
+    let request = read_action_request(&command.request)?;
     let source = presentation_source(&command, store_path.clone())?;
-    ensure_request_allows_artifact(&request, &source.artifact_type)?;
+    let grant = command
+        .grant
+        .as_ref()
+        .map(read_grant_with_hash)
+        .transpose()?;
+    let presentation = build_presentation(PresentationBuild {
+        request,
+        source,
+        grant,
+        approval_id: command.approval_id,
+        signing_key: command.signing_key,
+        uses_so_far: command.uses_so_far,
+        now: command.now,
+        presentation_id: command.presentation_id,
+        cred_id: command.cred_id,
+        store_path,
+    })?;
+    print_json(&presentation)
+}
+
+struct PresentationBuild {
+    request: CredActionRequest,
+    source: PresentationSource,
+    grant: Option<(CredPermissionGrant, String)>,
+    approval_id: Option<String>,
+    signing_key: Option<PathBuf>,
+    uses_so_far: u64,
+    now: Option<u64>,
+    presentation_id: String,
+    cred_id: String,
+    store_path: Option<PathBuf>,
+}
+
+fn build_presentation(input: PresentationBuild) -> Result<CredPresentation> {
+    ensure!(
+        input.grant.is_some() || input.approval_id.is_none(),
+        "--approval-id requires --grant"
+    );
+    ensure_request_allows_artifact(&input.request, &input.source.artifact_type)?;
     let mut approval_id = None;
 
-    if let Some(grant_path) = &command.grant {
-        let (grant, grant_hash) = read_grant_with_hash(grant_path)?;
+    if let Some((grant, grant_hash)) = &input.grant {
         let approval = require_approved_grant(
-            store_path.clone(),
-            &grant,
-            &grant_hash,
-            command.approval_id.as_deref(),
+            input.store_path.clone(),
+            grant,
+            grant_hash,
+            input.approval_id.as_deref(),
         )?;
         approval_id = Some(approval.approval_id);
-        let now = match command.now {
+        let now = match input.now {
             Some(now) => now,
             None => now_unix()?,
         };
         enforce_presentation_grant(
-            &grant,
-            &request,
-            &command.cred_id,
-            &source.artifact_type,
+            grant,
+            &input.request,
+            &input.cred_id,
+            &input.source.artifact_type,
             GrantUsage {
                 now,
-                uses_so_far: command.uses_so_far,
+                uses_so_far: input.uses_so_far,
             },
         )?;
     }
@@ -1577,23 +1914,23 @@ fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
     let mut presentation = CredPresentation {
         contract_version: "sophia/v1".to_owned(),
         artifact_type: "cred.presentation".to_owned(),
-        presentation_id: command.presentation_id,
-        cred_id: command.cred_id,
-        request_id: request.request_id,
-        grant_id: request.grant_id,
-        app_id: request.app_id,
+        presentation_id: input.presentation_id,
+        cred_id: input.cred_id,
+        request_id: input.request.request_id,
+        grant_id: input.request.grant_id,
+        app_id: input.request.app_id,
         created_at: now_unix()?,
         artifacts: vec![PresentedArtifact {
-            artifact_type: source.artifact_type,
-            artifact_hash: source.artifact_hash,
-            record_id: source.record_id,
-            disclosure: source.disclosure,
-            artifact: source.artifact,
+            artifact_type: input.source.artifact_type,
+            artifact_hash: input.source.artifact_hash,
+            record_id: input.source.record_id,
+            disclosure: input.source.disclosure,
+            artifact: input.source.artifact,
         }],
         cred_signature: None,
     };
     presentation.validate()?;
-    if let Some(signing_key) = command.signing_key {
+    if let Some(signing_key) = input.signing_key {
         let secret_key = read_secret_key(&signing_key)?;
         presentation = sign_presentation(presentation, &secret_key)?;
         verify_presentation_signature(&presentation)?;
@@ -1602,8 +1939,8 @@ fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
     let presentation_hash = canonical_hash_hex(&presentation_value)?;
     let audit =
         PresentationAuditEntry::from_presentation(&presentation, presentation_hash, approval_id);
-    record_store(store_path)?.append_presentation_audit(&audit)?;
-    print_json(&presentation)
+    record_store(input.store_path)?.append_presentation_audit(&audit)?;
+    Ok(presentation)
 }
 
 fn require_approved_grant(
@@ -1699,6 +2036,13 @@ fn presentation_source_from_artifact(
     disclosure: Option<&str>,
 ) -> Result<PresentationSource> {
     let artifact = read_json(path)?;
+    presentation_source_from_value(artifact, disclosure)
+}
+
+fn presentation_source_from_value(
+    artifact: Value,
+    disclosure: Option<&str>,
+) -> Result<PresentationSource> {
     let artifact_type = artifact_type(&artifact)
         .context("presented artifact must include artifact_type")?
         .to_owned();
@@ -1780,6 +2124,17 @@ fn ensure_request_allows_artifact(request: &CredActionRequest, artifact_type: &s
     }
 
     Ok(())
+}
+
+fn read_action_request(path: &PathBuf) -> Result<CredActionRequest> {
+    parse_action_request(read_json(path)?)
+}
+
+fn parse_action_request(value: Value) -> Result<CredActionRequest> {
+    let request: CredActionRequest =
+        serde_json::from_value(value).context("request must be a cred.action_request artifact")?;
+    request.validate()?;
+    Ok(request)
 }
 
 fn read_json(path: &PathBuf) -> Result<Value> {
