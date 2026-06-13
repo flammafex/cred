@@ -46,7 +46,7 @@ The schema lives at `contracts/schemas/cred-agent.schema.json`.
 | `crates/cred-store` | Durable local JSONL store for records, imported grants, and presentation audit metadata. |
 | `crates/cred-cli` | `cred` command-line interface. |
 | `contracts/` | Standalone Cred contract files. |
-| `docs/` | Human-readable protocol notes. |
+| `docs/` | Human-readable protocol notes, including the stdio service contract. |
 | `examples/` | Example Cred artifacts. |
 
 ## Current CLI
@@ -136,6 +136,12 @@ cargo run -p cred-cli -- present \
 
 cargo run -p cred-cli -- --store ./tmp/cred-store serve stdio
 ```
+
+Stdio client contract and fixtures:
+
+- `docs/cred-stdio-service.md`
+- `examples/stdio-service/requests.jsonl`
+- `examples/stdio-service/responses.example.jsonl`
 
 Witness adapter smoke:
 

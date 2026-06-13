@@ -181,6 +181,9 @@ exact grant hash must be approved, exactly as in the CLI presentation flow.
 Successful service presentations append the same presentation audit records as
 CLI presentations.
 
+Client-facing method details and fixtures live in
+`docs/cred-stdio-service.md`.
+
 ## Storage Rules
 
 `cred.artifact_record` is metadata. It may contain hashes, labels, source app,

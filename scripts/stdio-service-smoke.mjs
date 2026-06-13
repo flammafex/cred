@@ -8,16 +8,6 @@ if (!bin || !storeDir || !rootDir) {
   throw new Error('usage: stdio-service-smoke.mjs <cred-bin> <store-dir> <repo-root>');
 }
 
-const grant = JSON.parse(
-  fs.readFileSync(path.join(rootDir, 'examples/witness-permission-grant.json'), 'utf8'),
-);
-const request = JSON.parse(
-  fs.readFileSync(path.join(rootDir, 'examples/witness-presentation-request.json'), 'utf8'),
-);
-const attestation = JSON.parse(
-  fs.readFileSync(path.join(rootDir, 'examples/witness-signed-attestation.json'), 'utf8'),
-);
-
 const service = spawn(bin, ['--store', storeDir, 'serve', 'stdio'], {
   stdio: ['pipe', 'pipe', 'pipe'],
 });
@@ -31,56 +21,14 @@ service.stderr.on('data', chunk => {
   stderr += chunk;
 });
 
-const requests = [
-  {
-    id: 'info',
-    method: 'cred.service_info',
-  },
-  {
-    id: 'review',
-    method: 'cred.grant_review',
-    params: { grant },
-  },
-  {
-    id: 'import',
-    method: 'cred.grant_import',
-    params: {
-      grant,
-      source_uri: 'examples/witness-permission-grant.json',
-    },
-  },
-  {
-    id: 'approve',
-    method: 'cred.grant_approve',
-    params: {
-      grant,
-      approval_id: 'approval-stdio-witness-1',
-      reviewer: 'stdio-smoke',
-      note: 'approved by stdio smoke',
-      source_uri: 'examples/witness-permission-grant.json',
-    },
-  },
-  {
-    id: 'present',
-    method: 'cred.present',
-    params: {
-      request,
-      grant,
-      approval_id: 'approval-stdio-witness-1',
-      artifact: attestation,
-      disclosure: 'embedded',
-      presentation_id: 'presentation-stdio-witness-1',
-      cred_id: 'cred:local:example',
-    },
-  },
-  {
-    id: 'inventory',
-    method: 'cred.vault_inventory',
-  },
-];
+const requestLines = fs
+  .readFileSync(path.join(rootDir, 'examples/stdio-service/requests.jsonl'), 'utf8')
+  .trim()
+  .split('\n');
 
-for (const request of requests) {
-  service.stdin.write(`${JSON.stringify(request)}\n`);
+for (const line of requestLines) {
+  JSON.parse(line);
+  service.stdin.write(`${line}\n`);
 }
 service.stdin.end();
 
