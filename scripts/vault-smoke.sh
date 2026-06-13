@@ -10,10 +10,17 @@ BIN="$ROOT_DIR/target/debug/cred"
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p cred-cli >/dev/null
 
 "$BIN" --store "$STORE_DIR" key generate >"$STORE_DIR/key.json"
+"$BIN" grant review "$ROOT_DIR/examples/witness-permission-grant.json" \
+  >"$STORE_DIR/grant-review.json"
 "$BIN" --store "$STORE_DIR" grant import "$ROOT_DIR/examples/witness-permission-grant.json" \
   >"$STORE_DIR/grant.json"
 "$BIN" --store "$STORE_DIR" grant get grant-witness-attestation-1 \
   >"$STORE_DIR/grant-get.json"
+"$BIN" --store "$STORE_DIR" grant approve "$ROOT_DIR/examples/witness-permission-grant.json" \
+  --approval-id approval-vault-witness-1 \
+  >"$STORE_DIR/grant-approval.json"
+"$BIN" --store "$STORE_DIR" grant approval-get approval-vault-witness-1 \
+  >"$STORE_DIR/grant-approval-get.json"
 "$BIN" --store "$STORE_DIR" record add "$ROOT_DIR/examples/witness-signed-attestation.json" \
   --record-id record-vault-witness-1 \
   --cred-id cred:local:example \
@@ -28,6 +35,7 @@ cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p cred-cli >/dev/null
 "$BIN" --store "$STORE_DIR" witness present \
   --request "$ROOT_DIR/examples/witness-presentation-request.json" \
   --grant "$ROOT_DIR/examples/witness-permission-grant.json" \
+  --approval-id approval-vault-witness-1 \
   --record-id record-vault-witness-1 \
   --presentation-id presentation-vault-witness-1 \
   --cred-id cred:local:example \
@@ -37,8 +45,11 @@ cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p cred-cli >/dev/null
 "$BIN" --store "$STORE_DIR" vault inventory >"$STORE_DIR/inventory.json"
 
 node "$ROOT_DIR/scripts/vault-smoke-check.mjs" \
+  "$STORE_DIR/grant-review.json" \
   "$STORE_DIR/grant.json" \
   "$STORE_DIR/grant-get.json" \
+  "$STORE_DIR/grant-approval.json" \
+  "$STORE_DIR/grant-approval-get.json" \
   "$STORE_DIR/record.json" \
   "$STORE_DIR/revealed.json" \
   "$STORE_DIR/hash.json" \

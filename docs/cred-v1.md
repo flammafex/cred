@@ -114,6 +114,21 @@ also checked against `constraints.allowed_artifact_types` when that constraint
 is present. If the request itself names `action.artifact_type`, the presentation
 must use one of those requested artifact types.
 
+The CLI also requires a local approval record before presenting under a grant.
+`cred grant review` prints a `cred.grant_review` summary that includes the
+grant hash, app, capabilities, constraints, and warnings meant for a human
+operator. `cred grant approve` and `cred grant deny` write append-only
+`cred.grant_approval` records for the exact canonical hash of the reviewed
+`cred.permission_grant`.
+
+Presentation commands that receive `--grant` require a matching approved
+`cred.grant_approval`. The latest local decision for the exact grant hash must
+be approved. `--approval-id` can additionally pin which approval record is
+linked into the presentation audit, but it does not override a later denial. A
+missing approval, hash mismatch, pinned denial, or latest denial blocks the
+presentation before any presentation audit entry is written. `cred grant check`
+remains a pure constraint check and does not require local approval.
+
 ## Disclosure Modes
 
 Presented artifacts use one of three disclosure modes:
@@ -157,24 +172,28 @@ artifact.
 groups record counts by artifact type, custody mode, and privacy class, and
 reports whether each `local_encrypted` record has its encrypted blob present.
 
-The v1 local store also writes two metadata-only audit indexes:
+The v1 local store also writes three metadata-only audit indexes:
 
 - `grants.jsonl`: imported permission grants represented as
   `cred.stored_grant` summaries. Each entry stores the grant id, app id,
   granted capabilities, constraints, source URI, timestamps, and the canonical
   hash of the original `cred.permission_grant`.
+- `grant_approvals.jsonl`: local approval and denial records represented as
+  `cred.grant_approval` summaries. Each entry stores the approval id, decision,
+  exact grant hash, app id, capabilities, constraints, review summary,
+  warnings, reviewer metadata, notes, and timestamps.
 - `presentation_audit.jsonl`: successful presentation events represented as
   `cred.presentation_audit` summaries. Each entry stores the presentation id,
-  request id, app id, optional grant id, presentation hash, presented artifact
-  hashes, referenced record ids, and disclosure modes.
+  request id, app id, optional grant id, optional approval id, presentation
+  hash, presented artifact hashes, referenced record ids, and disclosure modes.
 
 These audit files do not contain decrypted artifacts, embedded raw proof
 material, local private keys, or vault passphrases. They answer inventory
 questions such as "who has access?" and "what have I disclosed?" while keeping
 artifact custody separate from authorization and disclosure history.
 
-`vault inventory` includes those imported grants and successful presentation
-audit entries alongside holdings, so the inventory can be generated without
-decrypting local encrypted blobs.
+`vault inventory` includes imported grants, grant approval decisions, and
+successful presentation audit entries alongside holdings, so the inventory can
+be generated without decrypting local encrypted blobs.
 
 Schema: `contracts/schemas/cred-agent.schema.json`.

@@ -6,7 +6,7 @@ use cred_core::{
     verify_presentation_signature, CredActionRequest, CredEndpoint, CredPermissionGrant,
     CredPresentation, GrantUsage, PresentedArtifact,
 };
-use cred_store::{PresentationAuditEntry, RecordStore, StoredGrant};
+use cred_store::{GrantApproval, PresentationAuditEntry, RecordStore, StoredGrant};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -115,12 +115,22 @@ enum VaultCommand {
 
 #[derive(Debug, Subcommand)]
 enum GrantCommand {
+    /// Print a human-readable review summary for a cred.permission_grant.
+    Review(GrantReviewCommand),
     /// Import a cred.permission_grant into the local store.
     Import(GrantImportCommand),
+    /// Approve an exact cred.permission_grant hash.
+    Approve(GrantDecisionCommand),
+    /// Deny an exact cred.permission_grant hash.
+    Deny(GrantDecisionCommand),
     /// List stored permission grants.
     List,
     /// Get one stored permission grant by ID.
     Get(GrantGetCommand),
+    /// List local grant approval and denial records.
+    Approvals,
+    /// Get one local grant approval or denial record by ID.
+    ApprovalGet(GrantApprovalGetCommand),
     /// Check whether a cred.action_request is allowed by a cred.permission_grant.
     Check(GrantCheckCommand),
 }
@@ -219,6 +229,8 @@ struct WitnessPresentCommand {
     record_id: String,
     #[arg(long)]
     grant: Option<PathBuf>,
+    #[arg(long)]
+    approval_id: Option<String>,
     #[arg(long, env = "CRED_CONTROLLER_SK")]
     signing_key: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
@@ -262,6 +274,8 @@ struct FreebirdPresentCheckCommand {
     record_id: String,
     #[arg(long)]
     grant: Option<PathBuf>,
+    #[arg(long)]
+    approval_id: Option<String>,
     #[arg(long, env = "CRED_CONTROLLER_SK")]
     signing_key: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
@@ -305,6 +319,8 @@ struct MatchlockPresentArtifactCommand {
     record_id: String,
     #[arg(long)]
     grant: Option<PathBuf>,
+    #[arg(long)]
+    approval_id: Option<String>,
     #[arg(long, env = "CRED_CONTROLLER_SK")]
     signing_key: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
@@ -332,6 +348,11 @@ struct RecordRevealCommand {
 }
 
 #[derive(Debug, Args)]
+struct GrantReviewCommand {
+    grant: PathBuf,
+}
+
+#[derive(Debug, Args)]
 struct GrantImportCommand {
     grant: PathBuf,
     #[arg(long)]
@@ -339,8 +360,26 @@ struct GrantImportCommand {
 }
 
 #[derive(Debug, Args)]
+struct GrantDecisionCommand {
+    grant: PathBuf,
+    #[arg(long)]
+    approval_id: String,
+    #[arg(long)]
+    reviewer: Option<String>,
+    #[arg(long)]
+    note: Option<String>,
+    #[arg(long)]
+    source_uri: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct GrantGetCommand {
     grant_id: String,
+}
+
+#[derive(Debug, Args)]
+struct GrantApprovalGetCommand {
+    approval_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -353,6 +392,8 @@ struct PresentCommand {
     record_id: Option<String>,
     #[arg(long)]
     grant: Option<PathBuf>,
+    #[arg(long)]
+    approval_id: Option<String>,
     #[arg(long, env = "CRED_CONTROLLER_SK")]
     signing_key: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
@@ -548,6 +589,7 @@ fn witness_present(command: WitnessPresentCommand, store_path: Option<PathBuf>) 
             artifact: None,
             record_id: Some(command.record_id),
             grant: command.grant,
+            approval_id: command.approval_id,
             signing_key: command.signing_key,
             uses_so_far: command.uses_so_far,
             now: command.now,
@@ -645,6 +687,7 @@ fn freebird_present_check(
             artifact: None,
             record_id: Some(command.record_id),
             grant: command.grant,
+            approval_id: command.approval_id,
             signing_key: command.signing_key,
             uses_so_far: command.uses_so_far,
             now: command.now,
@@ -746,6 +789,7 @@ fn matchlock_present_artifact(
             artifact: None,
             record_id: Some(command.record_id),
             grant: command.grant,
+            approval_id: command.approval_id,
             signing_key: command.signing_key,
             uses_so_far: command.uses_so_far,
             now: command.now,
@@ -1103,11 +1147,13 @@ fn vault_inventory(store_path: Option<PathBuf>) -> Result<()> {
     let store = record_store(store_path)?;
     let records = store.list_records()?;
     let grants = store.list_grants()?;
+    let grant_approvals = store.list_grant_approvals()?;
     let presentations = store.list_presentation_audit()?;
     let mut artifact_types = BTreeMap::new();
     let mut custody = BTreeMap::new();
     let mut privacy = BTreeMap::new();
     let mut grant_apps = BTreeMap::new();
+    let mut grant_decisions = BTreeMap::new();
     let mut presentation_apps = BTreeMap::new();
     let mut disclosure_modes = BTreeMap::new();
     let mut holdings = Vec::with_capacity(records.len());
@@ -1147,6 +1193,9 @@ fn vault_inventory(store_path: Option<PathBuf>) -> Result<()> {
     for grant in &grants {
         increment_count(&mut grant_apps, &grant.app_id);
     }
+    for approval in &grant_approvals {
+        increment_count(&mut grant_decisions, &approval.decision);
+    }
     for presentation in &presentations {
         increment_count(&mut presentation_apps, &presentation.app_id);
         for artifact in &presentation.artifacts {
@@ -1160,11 +1209,13 @@ fn vault_inventory(store_path: Option<PathBuf>) -> Result<()> {
         store_root: store.root().display().to_string(),
         total_records: holdings.len() as u64,
         total_grants: grants.len() as u64,
+        total_grant_approvals: grant_approvals.len() as u64,
         total_presentations: presentations.len() as u64,
         artifact_types,
         custody,
         privacy,
         grant_apps,
+        grant_decisions,
         presentation_apps,
         disclosure_modes,
         local_encrypted: LocalEncryptedSummary {
@@ -1173,6 +1224,7 @@ fn vault_inventory(store_path: Option<PathBuf>) -> Result<()> {
         },
         holdings,
         grants,
+        grant_approvals,
         presentations,
     };
     print_json(&inventory)
@@ -1185,16 +1237,19 @@ struct VaultInventory {
     store_root: String,
     total_records: u64,
     total_grants: u64,
+    total_grant_approvals: u64,
     total_presentations: u64,
     artifact_types: BTreeMap<String, u64>,
     custody: BTreeMap<String, u64>,
     privacy: BTreeMap<String, u64>,
     grant_apps: BTreeMap<String, u64>,
+    grant_decisions: BTreeMap<String, u64>,
     presentation_apps: BTreeMap<String, u64>,
     disclosure_modes: BTreeMap<String, u64>,
     local_encrypted: LocalEncryptedSummary,
     holdings: Vec<InventoryHolding>,
     grants: Vec<StoredGrant>,
+    grant_approvals: Vec<GrantApproval>,
     presentations: Vec<PresentationAuditEntry>,
 }
 
@@ -1272,19 +1327,42 @@ fn increment_count(counts: &mut BTreeMap<String, u64>, key: &str) {
 
 fn grant(command: GrantCommand, store_path: Option<PathBuf>) -> Result<()> {
     match command {
+        GrantCommand::Review(command) => grant_review(command),
         GrantCommand::Import(command) => grant_import(command, store_path),
+        GrantCommand::Approve(command) => grant_decision(command, store_path, "approved"),
+        GrantCommand::Deny(command) => grant_decision(command, store_path, "denied"),
         GrantCommand::List => grant_list(store_path),
         GrantCommand::Get(command) => grant_get(command, store_path),
+        GrantCommand::Approvals => grant_approvals(store_path),
+        GrantCommand::ApprovalGet(command) => grant_approval_get(command, store_path),
         GrantCommand::Check(command) => grant_check(command),
     }
 }
 
+fn grant_review(command: GrantReviewCommand) -> Result<()> {
+    let (grant, grant_hash) = read_grant_with_hash(&command.grant)?;
+    let summary = grant_review_summary(&grant);
+    let warnings = grant_review_warnings(&grant);
+    let review = serde_json::json!({
+        "contract_version": "sophia/v1",
+        "artifact_type": "cred.grant_review",
+        "grant_id": grant.grant_id,
+        "grant_hash": grant_hash,
+        "cred_id": grant.cred_id,
+        "app_id": grant.app_id,
+        "app_pubkey": grant.app_pubkey,
+        "capabilities": grant.capabilities,
+        "constraints": grant.constraints,
+        "human_approval": grant.human_approval,
+        "created_at": grant.created_at,
+        "summary": summary,
+        "warnings": warnings
+    });
+    print_json(&review)
+}
+
 fn grant_import(command: GrantImportCommand, store_path: Option<PathBuf>) -> Result<()> {
-    let value = read_json(&command.grant)?;
-    let grant: CredPermissionGrant =
-        serde_json::from_value(value.clone()).context("grant must be a cred.permission_grant")?;
-    grant.validate()?;
-    let grant_hash = canonical_hash_hex(&value)?;
+    let (grant, grant_hash) = read_grant_with_hash(&command.grant)?;
     let source_uri = command
         .source_uri
         .or_else(|| Some(command.grant.display().to_string()));
@@ -1292,6 +1370,32 @@ fn grant_import(command: GrantImportCommand, store_path: Option<PathBuf>) -> Res
     let store = record_store(store_path)?;
     store.append_grant(&stored)?;
     print_json(&stored)
+}
+
+fn grant_decision(
+    command: GrantDecisionCommand,
+    store_path: Option<PathBuf>,
+    decision: &'static str,
+) -> Result<()> {
+    let (grant, grant_hash) = read_grant_with_hash(&command.grant)?;
+    let source_uri = command
+        .source_uri
+        .or_else(|| Some(command.grant.display().to_string()));
+    let approval = GrantApproval::from_grant(
+        &grant,
+        grant_hash,
+        decision.to_owned(),
+        command.approval_id,
+        grant_review_summary(&grant),
+        grant_review_warnings(&grant),
+        command.reviewer,
+        command.note,
+        source_uri,
+        now_unix()?,
+    );
+    let store = record_store(store_path)?;
+    store.append_grant_approval(&approval)?;
+    print_json(&approval)
 }
 
 fn grant_list(store_path: Option<PathBuf>) -> Result<()> {
@@ -1304,12 +1408,101 @@ fn grant_list(store_path: Option<PathBuf>) -> Result<()> {
     print_json(&summary)
 }
 
+fn grant_approvals(store_path: Option<PathBuf>) -> Result<()> {
+    let approvals = record_store(store_path)?.list_grant_approvals()?;
+    let summary = serde_json::json!({
+        "contract_version": "sophia/v1",
+        "artifact_type": "cred.grant_approval_list",
+        "approvals": approvals
+    });
+    print_json(&summary)
+}
+
+fn grant_approval_get(command: GrantApprovalGetCommand, store_path: Option<PathBuf>) -> Result<()> {
+    let store = record_store(store_path)?;
+    let Some(approval) = store.get_grant_approval(&command.approval_id)? else {
+        bail!("grant approval not found: {}", command.approval_id);
+    };
+    print_json(&approval)
+}
+
 fn grant_get(command: GrantGetCommand, store_path: Option<PathBuf>) -> Result<()> {
     let store = record_store(store_path)?;
     let Some(grant) = store.get_grant(&command.grant_id)? else {
         bail!("grant not found: {}", command.grant_id);
     };
     print_json(&grant)
+}
+
+fn read_grant_with_hash(path: &PathBuf) -> Result<(CredPermissionGrant, String)> {
+    let value = read_json(path)?;
+    let grant: CredPermissionGrant =
+        serde_json::from_value(value.clone()).context("grant must be a cred.permission_grant")?;
+    grant.validate()?;
+    let grant_hash = canonical_hash_hex(&value)?;
+    Ok((grant, grant_hash))
+}
+
+fn grant_review_summary(grant: &CredPermissionGrant) -> Vec<String> {
+    let mut summary = Vec::new();
+    summary.push(format!(
+        "App {} can request: {}.",
+        grant.app_id,
+        grant.capabilities.join(", ")
+    ));
+    if let Some(audiences) = &grant.constraints.allowed_audiences {
+        summary.push(format!("Allowed audiences: {}.", audiences.join(", ")));
+    }
+    if let Some(artifact_types) = &grant.constraints.allowed_artifact_types {
+        summary.push(format!(
+            "Allowed artifact types: {}.",
+            artifact_types.join(", ")
+        ));
+    }
+    match grant.constraints.max_uses {
+        Some(max_uses) => summary.push(format!("Maximum uses: {max_uses}.")),
+        None => summary.push("No maximum use count is set.".to_owned()),
+    }
+    match grant.constraints.expires_at {
+        Some(expires_at) => summary.push(format!("Expires at Unix time {expires_at}.")),
+        None => summary.push("No expiration is set.".to_owned()),
+    }
+    summary.push(format!(
+        "Human approval mode requested by grant: {}.",
+        grant.human_approval
+    ));
+    summary
+}
+
+fn grant_review_warnings(grant: &CredPermissionGrant) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if grant.app_pubkey.is_none() {
+        warnings.push("Grant does not bind an app public key.".to_owned());
+    }
+    if grant.constraints.allowed_audiences.is_none() {
+        warnings.push("Grant does not restrict audiences.".to_owned());
+    }
+    if grant.constraints.allowed_artifact_types.is_none() {
+        warnings.push("Grant does not restrict artifact types.".to_owned());
+    }
+    if grant.constraints.max_uses.is_none() {
+        warnings.push("Grant has no max_uses limit.".to_owned());
+    }
+    if grant.constraints.expires_at.is_none() {
+        warnings.push("Grant does not expire.".to_owned());
+    }
+    if grant.constraints.allow_export == Some(true)
+        || grant
+            .capabilities
+            .iter()
+            .any(|capability| capability.ends_with(".export"))
+    {
+        warnings.push("Grant allows export-style capabilities.".to_owned());
+    }
+    if grant.human_approval == "none" {
+        warnings.push("Grant does not request per-use human approval.".to_owned());
+    }
+    warnings
 }
 
 fn grant_check(command: GrantCheckCommand) -> Result<()> {
@@ -1343,6 +1536,10 @@ fn grant_check(command: GrantCheckCommand) -> Result<()> {
 }
 
 fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
+    ensure!(
+        command.grant.is_some() || command.approval_id.is_none(),
+        "--approval-id requires --grant"
+    );
     let request_value = read_json(&command.request)?;
     let request: CredActionRequest = serde_json::from_value(request_value)
         .context("request must be a cred.action_request artifact")?;
@@ -1350,10 +1547,17 @@ fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
 
     let source = presentation_source(&command, store_path.clone())?;
     ensure_request_allows_artifact(&request, &source.artifact_type)?;
+    let mut approval_id = None;
 
     if let Some(grant_path) = &command.grant {
-        let grant: CredPermissionGrant = serde_json::from_value(read_json(grant_path)?)
-            .context("grant must be a cred.permission_grant artifact")?;
+        let (grant, grant_hash) = read_grant_with_hash(grant_path)?;
+        let approval = require_approved_grant(
+            store_path.clone(),
+            &grant,
+            &grant_hash,
+            command.approval_id.as_deref(),
+        )?;
+        approval_id = Some(approval.approval_id);
         let now = match command.now {
             Some(now) => now,
             None => now_unix()?,
@@ -1396,9 +1600,65 @@ fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
     }
     let presentation_value = serde_json::to_value(&presentation)?;
     let presentation_hash = canonical_hash_hex(&presentation_value)?;
-    let audit = PresentationAuditEntry::from_presentation(&presentation, presentation_hash);
+    let audit =
+        PresentationAuditEntry::from_presentation(&presentation, presentation_hash, approval_id);
     record_store(store_path)?.append_presentation_audit(&audit)?;
     print_json(&presentation)
+}
+
+fn require_approved_grant(
+    store_path: Option<PathBuf>,
+    grant: &CredPermissionGrant,
+    grant_hash: &str,
+    approval_id: Option<&str>,
+) -> Result<GrantApproval> {
+    let store = record_store(store_path)?;
+    let approvals = store.list_grant_approvals()?;
+    let approval = match approval_id {
+        Some(approval_id) => approvals
+            .iter()
+            .find(|approval| approval.approval_id == approval_id)
+            .cloned()
+            .with_context(|| format!("grant approval not found: {approval_id}"))?,
+        None => approvals
+            .iter()
+            .rev()
+            .find(|approval| approval.grant_hash == grant_hash)
+            .cloned()
+            .context(
+                "permission grant has no local approval record; run cred grant review and cred grant approve first",
+            )?,
+    };
+
+    ensure!(
+        approval.grant_hash == grant_hash,
+        "grant approval does not match current grant hash"
+    );
+    ensure!(
+        approval.grant_id == grant.grant_id
+            && approval.cred_id == grant.cred_id
+            && approval.app_id == grant.app_id,
+        "grant approval metadata does not match current grant"
+    );
+    let latest_decision = approvals
+        .iter()
+        .rev()
+        .find(|candidate| candidate.grant_hash == grant_hash)
+        .context(
+            "permission grant has no local approval record; run cred grant review and cred grant approve first",
+        )?;
+    ensure!(
+        latest_decision.decision == "approved",
+        "permission grant was not approved: {}",
+        latest_decision.decision
+    );
+    ensure!(
+        approval.decision == "approved",
+        "pinned grant approval was not approved: {}",
+        approval.decision
+    );
+
+    Ok(approval)
 }
 
 #[derive(Debug)]
@@ -1591,6 +1851,7 @@ fn now_unix() -> Result<u64> {
 mod tests {
     use super::*;
     use cred_core::{artifact_record, CredAction, CredGrantConstraints};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn record_backed_presentations_are_references() {
@@ -1660,6 +1921,92 @@ mod tests {
         assert!(err
             .to_string()
             .contains("request does not allow presented artifact type"));
+    }
+
+    #[test]
+    fn presentation_requires_local_grant_approval() {
+        let root = temp_store_root("requires-approval");
+        let grant = sample_grant(Some(vec!["witness.signed_attestation".to_owned()]));
+        let grant_hash = grant_hash(&grant);
+
+        let err =
+            require_approved_grant(Some(root.clone()), &grant, &grant_hash, None).unwrap_err();
+        assert!(err.to_string().contains("no local approval record"));
+
+        let store = RecordStore::new(&root);
+        let approval = sample_approval(&grant, &grant_hash, "approved", "approval-1");
+        store.append_grant_approval(&approval).unwrap();
+
+        let approved =
+            require_approved_grant(Some(root.clone()), &grant, &grant_hash, None).unwrap();
+        assert_eq!(approved.approval_id, "approval-1");
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn latest_denial_blocks_even_with_pinned_approval() {
+        let root = temp_store_root("latest-approval");
+        let grant = sample_grant(Some(vec!["witness.signed_attestation".to_owned()]));
+        let grant_hash = grant_hash(&grant);
+        let store = RecordStore::new(&root);
+        store
+            .append_grant_approval(&sample_approval(
+                &grant,
+                &grant_hash,
+                "approved",
+                "approval-1",
+            ))
+            .unwrap();
+        store
+            .append_grant_approval(&sample_approval(&grant, &grant_hash, "denied", "denial-1"))
+            .unwrap();
+
+        let err =
+            require_approved_grant(Some(root.clone()), &grant, &grant_hash, None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("permission grant was not approved"));
+
+        let pinned_err =
+            require_approved_grant(Some(root.clone()), &grant, &grant_hash, Some("approval-1"))
+                .unwrap_err();
+        assert!(pinned_err
+            .to_string()
+            .contains("permission grant was not approved"));
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn pinned_approval_must_match_current_grant_hash() {
+        let root = temp_store_root("approval-hash-mismatch");
+        let grant = sample_grant(Some(vec!["witness.signed_attestation".to_owned()]));
+        let changed_grant = sample_grant(Some(vec!["cred.presentation".to_owned()]));
+        let original_hash = grant_hash(&grant);
+        let changed_hash = grant_hash(&changed_grant);
+        let store = RecordStore::new(&root);
+        store
+            .append_grant_approval(&sample_approval(
+                &grant,
+                &original_hash,
+                "approved",
+                "approval-1",
+            ))
+            .unwrap();
+
+        let err = require_approved_grant(
+            Some(root.clone()),
+            &changed_grant,
+            &changed_hash,
+            Some("approval-1"),
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("does not match current grant hash"));
+
+        cleanup(root);
     }
 
     #[test]
@@ -1860,5 +2207,41 @@ mod tests {
             created_at: 1,
             cred_signature: None,
         }
+    }
+
+    fn grant_hash(grant: &CredPermissionGrant) -> String {
+        canonical_hash_hex(&serde_json::to_value(grant).unwrap()).unwrap()
+    }
+
+    fn sample_approval(
+        grant: &CredPermissionGrant,
+        grant_hash: &str,
+        decision: &str,
+        approval_id: &str,
+    ) -> GrantApproval {
+        GrantApproval::from_grant(
+            grant,
+            grant_hash.to_owned(),
+            decision.to_owned(),
+            approval_id.to_owned(),
+            grant_review_summary(grant),
+            grant_review_warnings(grant),
+            None,
+            None,
+            None,
+            2,
+        )
+    }
+
+    fn temp_store_root(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("cred-cli-{name}-{nanos}"))
+    }
+
+    fn cleanup(root: PathBuf) {
+        let _ = fs::remove_dir_all(root);
     }
 }

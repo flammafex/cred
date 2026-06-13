@@ -20,6 +20,7 @@ use zeroize::Zeroize;
 
 const RECORDS_FILE: &str = "records.jsonl";
 const GRANTS_FILE: &str = "grants.jsonl";
+const GRANT_APPROVALS_FILE: &str = "grant_approvals.jsonl";
 const PRESENTATION_AUDIT_FILE: &str = "presentation_audit.jsonl";
 const BLOBS_DIR: &str = "blobs";
 const BLOB_URI_PREFIX: &str = "cred-vault://blobs/";
@@ -49,6 +50,8 @@ pub enum StoreError {
     DuplicateRecord(String),
     #[error("grant already exists: {0}")]
     DuplicateGrant(String),
+    #[error("grant approval already exists: {0}")]
+    DuplicateGrantApproval(String),
     #[error("presentation audit entry already exists: {0}")]
     DuplicatePresentation(String),
     #[error("HOME is not set; pass --store")]
@@ -112,6 +115,40 @@ pub struct StoredGrant {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct GrantApproval {
+    pub contract_version: String,
+    pub artifact_type: String,
+    pub approval_id: String,
+    pub grant_id: String,
+    pub grant_hash: String,
+    pub cred_id: String,
+    pub app_id: String,
+    pub decision: String,
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_audiences: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_artifact_types: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_uses: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_export: Option<bool>,
+    pub human_approval: String,
+    pub summary: Vec<String>,
+    pub warnings: Vec<String>,
+    pub reviewed_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PresentationAuditEntry {
     pub contract_version: String,
     pub artifact_type: String,
@@ -121,6 +158,8 @@ pub struct PresentationAuditEntry {
     pub request_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
     pub app_id: String,
     pub presented_at: u64,
     pub artifacts: Vec<PresentationAuditArtifact>,
@@ -247,6 +286,29 @@ impl RecordStore {
             .list_grants()?
             .into_iter()
             .find(|grant| grant.grant_id == grant_id))
+    }
+
+    pub fn append_grant_approval(&self, approval: &GrantApproval) -> Result<(), StoreError> {
+        if self.get_grant_approval(&approval.approval_id)?.is_some() {
+            return Err(StoreError::DuplicateGrantApproval(
+                approval.approval_id.clone(),
+            ));
+        }
+        self.append_json_line(self.grant_approvals_path(), approval)
+    }
+
+    pub fn list_grant_approvals(&self) -> Result<Vec<GrantApproval>, StoreError> {
+        self.read_json_lines(self.grant_approvals_path())
+    }
+
+    pub fn get_grant_approval(
+        &self,
+        approval_id: &str,
+    ) -> Result<Option<GrantApproval>, StoreError> {
+        Ok(self
+            .list_grant_approvals()?
+            .into_iter()
+            .find(|approval| approval.approval_id == approval_id))
     }
 
     pub fn append_presentation_audit(
@@ -450,6 +512,10 @@ impl RecordStore {
         self.root.join(GRANTS_FILE)
     }
 
+    fn grant_approvals_path(&self) -> PathBuf {
+        self.root.join(GRANT_APPROVALS_FILE)
+    }
+
     fn presentation_audit_path(&self) -> PathBuf {
         self.root.join(PRESENTATION_AUDIT_FILE)
     }
@@ -519,8 +585,52 @@ impl StoredGrant {
     }
 }
 
+impl GrantApproval {
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_grant(
+        grant: &CredPermissionGrant,
+        grant_hash: String,
+        decision: String,
+        approval_id: String,
+        summary: Vec<String>,
+        warnings: Vec<String>,
+        reviewer: Option<String>,
+        notes: Option<String>,
+        source_uri: Option<String>,
+        reviewed_at: u64,
+    ) -> Self {
+        Self {
+            contract_version: "sophia/v1".to_owned(),
+            artifact_type: "cred.grant_approval".to_owned(),
+            approval_id,
+            grant_id: grant.grant_id.clone(),
+            grant_hash,
+            cred_id: grant.cred_id.clone(),
+            app_id: grant.app_id.clone(),
+            decision,
+            capabilities: grant.capabilities.clone(),
+            allowed_audiences: grant.constraints.allowed_audiences.clone(),
+            allowed_artifact_types: grant.constraints.allowed_artifact_types.clone(),
+            max_uses: grant.constraints.max_uses,
+            expires_at: grant.constraints.expires_at,
+            allow_export: grant.constraints.allow_export,
+            human_approval: grant.human_approval.clone(),
+            summary,
+            warnings,
+            reviewed_at,
+            reviewer,
+            notes,
+            source_uri,
+        }
+    }
+}
+
 impl PresentationAuditEntry {
-    pub fn from_presentation(presentation: &CredPresentation, presentation_hash: String) -> Self {
+    pub fn from_presentation(
+        presentation: &CredPresentation,
+        presentation_hash: String,
+        approval_id: Option<String>,
+    ) -> Self {
         Self {
             contract_version: "sophia/v1".to_owned(),
             artifact_type: "cred.presentation_audit".to_owned(),
@@ -529,6 +639,7 @@ impl PresentationAuditEntry {
             cred_id: presentation.cred_id.clone(),
             request_id: presentation.request_id.clone(),
             grant_id: presentation.grant_id.clone(),
+            approval_id,
             app_id: presentation.app_id.clone(),
             presented_at: presentation.created_at,
             artifacts: presentation
@@ -681,13 +792,78 @@ mod tests {
     }
 
     #[test]
+    fn appends_lists_and_gets_grant_approvals() {
+        let root = temp_store_root("grant-approvals");
+        let store = RecordStore::new(&root);
+        let grant = sample_grant();
+        let grant_hash = canonical_hash_hex(&serde_json::to_value(&grant).unwrap()).unwrap();
+        let approval = GrantApproval::from_grant(
+            &grant,
+            grant_hash.clone(),
+            "approved".to_owned(),
+            "approval-1".to_owned(),
+            vec!["App app:prestige:test can request witness.present_attestation.".to_owned()],
+            vec!["Grant does not bind an app public key.".to_owned()],
+            Some("local-user".to_owned()),
+            Some("reviewed in smoke".to_owned()),
+            Some("examples/permission-grant.json".to_owned()),
+            2,
+        );
+
+        store.append_grant_approval(&approval).unwrap();
+
+        assert_eq!(
+            store.list_grant_approvals().unwrap(),
+            vec![approval.clone()]
+        );
+        assert_eq!(
+            store.get_grant_approval("approval-1").unwrap(),
+            Some(approval.clone())
+        );
+        assert_eq!(store.get_grant_approval("missing").unwrap(), None);
+        assert_eq!(approval.grant_hash, grant_hash);
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn rejects_duplicate_grant_approval_ids() {
+        let root = temp_store_root("duplicate-grant-approvals");
+        let store = RecordStore::new(&root);
+        let grant = sample_grant();
+        let approval = GrantApproval::from_grant(
+            &grant,
+            canonical_hash_hex(&serde_json::to_value(&grant).unwrap()).unwrap(),
+            "approved".to_owned(),
+            "approval-1".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            2,
+        );
+
+        store.append_grant_approval(&approval).unwrap();
+        let err = store.append_grant_approval(&approval).unwrap_err();
+
+        assert!(matches!(err, StoreError::DuplicateGrantApproval(id) if id == "approval-1"));
+
+        cleanup(root);
+    }
+
+    #[test]
     fn appends_lists_and_rejects_duplicate_presentation_audit_entries() {
         let root = temp_store_root("presentation-audit");
         let store = RecordStore::new(&root);
         let presentation = sample_presentation();
         let presentation_hash =
             canonical_hash_hex(&serde_json::to_value(&presentation).unwrap()).unwrap();
-        let entry = PresentationAuditEntry::from_presentation(&presentation, presentation_hash);
+        let entry = PresentationAuditEntry::from_presentation(
+            &presentation,
+            presentation_hash,
+            Some("approval-1".to_owned()),
+        );
 
         store.append_presentation_audit(&entry).unwrap();
 
@@ -697,6 +873,7 @@ mod tests {
         );
         assert_eq!(entry.artifacts[0].record_id.as_deref(), Some("record-1"));
         assert_eq!(entry.artifacts[0].disclosure, "reference");
+        assert_eq!(entry.approval_id.as_deref(), Some("approval-1"));
         let err = store.append_presentation_audit(&entry).unwrap_err();
         assert!(matches!(err, StoreError::DuplicatePresentation(id) if id == "presentation-1"));
 

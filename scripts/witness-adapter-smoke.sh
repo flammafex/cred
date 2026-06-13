@@ -9,6 +9,11 @@ BIN="$ROOT_DIR/target/debug/cred"
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p cred-cli >/dev/null
 
 "$BIN" --store "$STORE_DIR" key generate >"$STORE_DIR/key.json"
+"$BIN" grant review "$ROOT_DIR/examples/witness-permission-grant.json" \
+  >"$STORE_DIR/grant-review.json"
+"$BIN" --store "$STORE_DIR" grant approve "$ROOT_DIR/examples/witness-permission-grant.json" \
+  --approval-id approval-witness-adapter-1 \
+  >"$STORE_DIR/grant-approval.json"
 "$BIN" --store "$STORE_DIR" witness import "$ROOT_DIR/examples/witness-signed-attestation.json" \
   --record-id record-witness-attestation-1 \
   --cred-id cred:local:example \
@@ -17,6 +22,7 @@ cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p cred-cli >/dev/null
 "$BIN" --store "$STORE_DIR" witness present \
   --request "$ROOT_DIR/examples/witness-presentation-request.json" \
   --grant "$ROOT_DIR/examples/witness-permission-grant.json" \
+  --approval-id approval-witness-adapter-1 \
   --record-id record-witness-attestation-1 \
   --presentation-id presentation-witness-adapter-1 \
   --cred-id cred:local:example \

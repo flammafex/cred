@@ -9,6 +9,11 @@ BIN="$ROOT_DIR/target/debug/cred"
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p cred-cli >/dev/null
 
 "$BIN" --store "$STORE_DIR" key generate >"$STORE_DIR/key.json"
+"$BIN" grant review "$ROOT_DIR/examples/matchlock-permission-grant.json" \
+  >"$STORE_DIR/grant-review.json"
+"$BIN" --store "$STORE_DIR" grant approve "$ROOT_DIR/examples/matchlock-permission-grant.json" \
+  --approval-id approval-matchlock-1 \
+  >"$STORE_DIR/grant-approval.json"
 "$BIN" --store "$STORE_DIR" matchlock import-artifact "$ROOT_DIR/examples/matchlock-commitment.json" \
   --record-id record-matchlock-commitment-1 \
   --cred-id cred:local:example \
@@ -17,6 +22,7 @@ cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p cred-cli >/dev/null
 "$BIN" --store "$STORE_DIR" matchlock present-artifact \
   --request "$ROOT_DIR/examples/matchlock-presentation-request.json" \
   --grant "$ROOT_DIR/examples/matchlock-permission-grant.json" \
+  --approval-id approval-matchlock-1 \
   --record-id record-matchlock-commitment-1 \
   --presentation-id presentation-matchlock-1 \
   --cred-id cred:local:example \

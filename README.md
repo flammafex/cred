@@ -83,13 +83,18 @@ cargo run -p cred-cli -- --store ./tmp/cred-store record reveal record-vault-wit
 cargo run -p cred-cli -- grant check \
   --grant examples/permission-grant.json \
   --request examples/action-request.json
+cargo run -p cred-cli -- grant review examples/witness-permission-grant.json
 cargo run -p cred-cli -- --store ./tmp/cred-store grant import examples/witness-permission-grant.json
+cargo run -p cred-cli -- --store ./tmp/cred-store grant approve examples/witness-permission-grant.json \
+  --approval-id approval-witness-attestation-1
 cargo run -p cred-cli -- --store ./tmp/cred-store grant list
 cargo run -p cred-cli -- --store ./tmp/cred-store grant get grant-witness-attestation-1
+cargo run -p cred-cli -- --store ./tmp/cred-store grant approvals
 
 cargo run -p cred-cli -- --store ./tmp/cred-store witness present \
   --request examples/witness-presentation-request.json \
   --grant examples/witness-permission-grant.json \
+  --approval-id approval-witness-attestation-1 \
   --record-id record-witness-attestation-1 \
   --presentation-id presentation-record-1 \
   --cred-id cred:local:example \
@@ -98,9 +103,12 @@ cargo run -p cred-cli -- --store ./tmp/cred-store witness present \
 cargo run -p cred-cli -- --store ./tmp/cred-store freebird import-check examples/freebird-check-request.json \
   --record-id record-freebird-check-1 \
   --cred-id cred:local:example
+cargo run -p cred-cli -- --store ./tmp/cred-store grant approve examples/freebird-permission-grant.json \
+  --approval-id approval-freebird-check-1
 cargo run -p cred-cli -- --store ./tmp/cred-store freebird present-check \
   --request examples/freebird-presentation-request.json \
   --grant examples/freebird-permission-grant.json \
+  --approval-id approval-freebird-check-1 \
   --record-id record-freebird-check-1 \
   --presentation-id presentation-freebird-check-1 \
   --cred-id cred:local:example \
@@ -109,9 +117,12 @@ cargo run -p cred-cli -- --store ./tmp/cred-store freebird present-check \
 cargo run -p cred-cli -- --store ./tmp/cred-store matchlock import-artifact examples/matchlock-commitment.json \
   --record-id record-matchlock-commitment-1 \
   --cred-id cred:local:example
+cargo run -p cred-cli -- --store ./tmp/cred-store grant approve examples/matchlock-permission-grant.json \
+  --approval-id approval-matchlock-1
 cargo run -p cred-cli -- --store ./tmp/cred-store matchlock present-artifact \
   --request examples/matchlock-presentation-request.json \
   --grant examples/matchlock-permission-grant.json \
+  --approval-id approval-matchlock-1 \
   --record-id record-matchlock-commitment-1 \
   --presentation-id presentation-matchlock-1 \
   --cred-id cred:local:example \
@@ -158,6 +169,8 @@ The first implementation is deliberately small:
    artifacts.
 7. Track imported grants and successful presentations as metadata-only local
    audit records.
+8. Require an explicit local approval for the exact permission-grant hash
+   before presenting under that grant.
 
 That is enough to prove the app boundary before adding app-facing service
 transport, Freebird issuance, Witness timestamping, or Matchlock derivation.
