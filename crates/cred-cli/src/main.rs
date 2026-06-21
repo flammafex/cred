@@ -260,8 +260,6 @@ struct WitnessPresentCommand {
     approval_id: Option<String>,
     #[arg(long, env = "CRED_CONTROLLER_SK")]
     signing_key: Option<PathBuf>,
-    #[arg(long, default_value_t = 0)]
-    uses_so_far: u64,
     #[arg(long)]
     now: Option<u64>,
     #[arg(long)]
@@ -305,8 +303,6 @@ struct FreebirdPresentCheckCommand {
     approval_id: Option<String>,
     #[arg(long, env = "CRED_CONTROLLER_SK")]
     signing_key: Option<PathBuf>,
-    #[arg(long, default_value_t = 0)]
-    uses_so_far: u64,
     #[arg(long)]
     now: Option<u64>,
     #[arg(long)]
@@ -350,8 +346,6 @@ struct MatchlockPresentArtifactCommand {
     approval_id: Option<String>,
     #[arg(long, env = "CRED_CONTROLLER_SK")]
     signing_key: Option<PathBuf>,
-    #[arg(long, default_value_t = 0)]
-    uses_so_far: u64,
     #[arg(long)]
     now: Option<u64>,
     #[arg(long)]
@@ -399,8 +393,6 @@ struct SocialGraphPresentAttestationCommand {
     request_binding_hash: String,
     #[arg(long, env = "CRED_CONTROLLER_SK")]
     signing_key: PathBuf,
-    #[arg(long, default_value_t = 0)]
-    uses_so_far: u64,
     #[arg(long)]
     now: Option<u64>,
     #[arg(long, env = "CRED_VAULT_PASSPHRASE")]
@@ -468,8 +460,6 @@ struct PresentCommand {
     approval_id: Option<String>,
     #[arg(long, env = "CRED_CONTROLLER_SK")]
     signing_key: Option<PathBuf>,
-    #[arg(long, default_value_t = 0)]
-    uses_so_far: u64,
     #[arg(long)]
     now: Option<u64>,
     #[arg(long)]
@@ -551,7 +541,6 @@ struct ServicePresentParams {
     approval_id: Option<String>,
     signing_key: Option<PathBuf>,
     sign: Option<bool>,
-    uses_so_far: Option<u64>,
     now: Option<u64>,
     presentation_id: String,
     cred_id: String,
@@ -715,7 +704,6 @@ fn service_present(params: Value, store_path: Option<PathBuf>) -> Result<Value> 
         grant,
         approval_id: params.approval_id,
         signing_key,
-        uses_so_far: params.uses_so_far.unwrap_or(0),
         now: params.now,
         presentation_id: params.presentation_id,
         cred_id: params.cred_id,
@@ -909,7 +897,6 @@ fn witness_present(command: WitnessPresentCommand, store_path: Option<PathBuf>) 
             grant: command.grant,
             approval_id: command.approval_id,
             signing_key: command.signing_key,
-            uses_so_far: command.uses_so_far,
             now: command.now,
             presentation_id: command.presentation_id,
             cred_id: command.cred_id,
@@ -1007,7 +994,6 @@ fn freebird_present_check(
             grant: command.grant,
             approval_id: command.approval_id,
             signing_key: command.signing_key,
-            uses_so_far: command.uses_so_far,
             now: command.now,
             presentation_id: command.presentation_id,
             cred_id: command.cred_id,
@@ -1139,6 +1125,11 @@ fn social_graph_present_attestation(
         Some(&command.approval_id),
     )?;
     let now = command.now.unwrap_or(now_unix()?);
+    // Derive uses_so_far from the store rather than trusting a caller-supplied
+    // value. Note: social_graph presentations are not yet appended to the
+    // audit log (see AGENTS.md risk #3), so this may undercount until that is
+    // fixed. It is still more correct than accepting 0 from the caller.
+    let uses_so_far = store.count_presentations_for_grant(&grant.grant_id)?;
     enforce_presentation_grant(
         &grant,
         &request,
@@ -1146,7 +1137,7 @@ fn social_graph_present_attestation(
         "social_graph.attestation",
         GrantUsage {
             now,
-            uses_so_far: command.uses_so_far,
+            uses_so_far,
         },
     )
     .context("permission grant denied social graph presentation")?;
@@ -1294,7 +1285,6 @@ fn matchlock_present_artifact(
             grant: command.grant,
             approval_id: command.approval_id,
             signing_key: command.signing_key,
-            uses_so_far: command.uses_so_far,
             now: command.now,
             presentation_id: command.presentation_id,
             cred_id: command.cred_id,
@@ -2104,7 +2094,6 @@ fn present(command: PresentCommand, store_path: Option<PathBuf>) -> Result<()> {
         grant,
         approval_id: command.approval_id,
         signing_key: command.signing_key,
-        uses_so_far: command.uses_so_far,
         now: command.now,
         presentation_id: command.presentation_id,
         cred_id: command.cred_id,
@@ -2119,7 +2108,6 @@ struct PresentationBuild {
     grant: Option<(CredPermissionGrant, String)>,
     approval_id: Option<String>,
     signing_key: Option<PathBuf>,
-    uses_so_far: u64,
     now: Option<u64>,
     presentation_id: String,
     cred_id: String,
@@ -2146,6 +2134,8 @@ fn build_presentation(input: PresentationBuild) -> Result<CredPresentation> {
             Some(now) => now,
             None => now_unix()?,
         };
+        let store = record_store(input.store_path.clone())?;
+        let uses_so_far = store.count_presentations_for_grant(&grant.grant_id)?;
         enforce_presentation_grant(
             grant,
             &input.request,
@@ -2153,7 +2143,7 @@ fn build_presentation(input: PresentationBuild) -> Result<CredPresentation> {
             &input.source.artifact_type,
             GrantUsage {
                 now,
-                uses_so_far: input.uses_so_far,
+                uses_so_far,
             },
         )?;
     }
@@ -2245,7 +2235,7 @@ fn require_approved_grant(
     Ok(approval)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PresentationSource {
     artifact_type: String,
     artifact_hash: String,
@@ -2895,6 +2885,57 @@ mod tests {
             "commitment": "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925",
             "hashes_raw_token_bytes": true
         })
+    }
+
+    #[test]
+    fn store_enforced_max_uses_blocks_replay() {
+        let root = temp_store_root("max-uses-enforcement");
+        let store = RecordStore::new(&root);
+
+        // Grant with max_uses = 1
+        let mut grant = sample_grant(Some(vec!["witness.signed_attestation".to_owned()]));
+        grant.constraints.max_uses = Some(1);
+        let hash = grant_hash(&grant);
+
+        // Approve the grant
+        let approval = sample_approval(&grant, &hash, "approved", "approval-1");
+        store.append_grant_approval(&approval).unwrap();
+
+        let request = sample_request(Some("witness.signed_attestation"));
+        let source = presentation_source_from_record(sample_record(), None).unwrap();
+
+        // First presentation should succeed (0 prior uses)
+        let first = build_presentation(PresentationBuild {
+            request: request.clone(),
+            source: source.clone(),
+            grant: Some((grant.clone(), hash.clone())),
+            approval_id: Some("approval-1".to_owned()),
+            signing_key: None,
+            now: Some(10),
+            presentation_id: "presentation-1".to_owned(),
+            cred_id: "cred:local:test".to_owned(),
+            store_path: Some(root.clone()),
+        })
+        .unwrap();
+        assert_eq!(first.presentation_id, "presentation-1");
+
+        // Second presentation under the same grant must fail (1 prior use, max 1)
+        let err = build_presentation(PresentationBuild {
+            request,
+            source,
+            grant: Some((grant, hash)),
+            approval_id: Some("approval-1".to_owned()),
+            signing_key: None,
+            now: Some(10),
+            presentation_id: "presentation-2".to_owned(),
+            cred_id: "cred:local:test".to_owned(),
+            store_path: Some(root.clone()),
+        })
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("max_uses has been reached"));
+
+        cleanup(root);
     }
 
     fn sample_record() -> cred_core::CredArtifactRecord {

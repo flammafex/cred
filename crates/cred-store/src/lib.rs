@@ -331,6 +331,20 @@ impl RecordStore {
         self.read_json_lines(self.presentation_audit_path())
     }
 
+    /// Count prior presentation audit entries for a given grant_id.
+    ///
+    /// This is the store-derived usage count used to enforce `max_uses`
+    /// on permission grants, replacing the previous caller-supplied
+    /// `uses_so_far` parameter. Presentations made without a grant
+    /// (`grant_id == None`) are not counted.
+    pub fn count_presentations_for_grant(&self, grant_id: &str) -> Result<u64, StoreError> {
+        Ok(self
+            .list_presentation_audit()?
+            .into_iter()
+            .filter(|entry| entry.grant_id.as_deref() == Some(grant_id))
+            .count() as u64)
+    }
+
     pub fn write_encrypted_artifact(
         &self,
         record: &CredArtifactRecord,
@@ -876,6 +890,35 @@ mod tests {
         assert_eq!(entry.approval_id.as_deref(), Some("approval-1"));
         let err = store.append_presentation_audit(&entry).unwrap_err();
         assert!(matches!(err, StoreError::DuplicatePresentation(id) if id == "presentation-1"));
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn counts_presentations_for_grant() {
+        let root = temp_store_root("count-presentations");
+        let store = RecordStore::new(&root);
+
+        // Three presentations under grant-1, one under grant-2, one without a grant.
+        for (id, grant_id) in [
+            ("pres-1", Some("grant-1")),
+            ("pres-2", Some("grant-1")),
+            ("pres-3", Some("grant-1")),
+            ("pres-4", Some("grant-2")),
+            ("pres-5", None),
+        ] {
+            let mut presentation = sample_presentation();
+            presentation.presentation_id = id.to_owned();
+            presentation.grant_id = grant_id.map(|g| g.to_owned());
+            let hash =
+                canonical_hash_hex(&serde_json::to_value(&presentation).unwrap()).unwrap();
+            let entry = PresentationAuditEntry::from_presentation(&presentation, hash, None);
+            store.append_presentation_audit(&entry).unwrap();
+        }
+
+        assert_eq!(store.count_presentations_for_grant("grant-1").unwrap(), 3);
+        assert_eq!(store.count_presentations_for_grant("grant-2").unwrap(), 1);
+        assert_eq!(store.count_presentations_for_grant("grant-absent").unwrap(), 0);
 
         cleanup(root);
     }
