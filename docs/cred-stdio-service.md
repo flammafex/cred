@@ -2,12 +2,15 @@
 
 `cred serve stdio` is the first app-facing Cred transport. It is a local
 newline-delimited JSON service over stdin/stdout. It lets an app ask Cred to
-review grants, record approvals, produce presentations, and inspect vault
-metadata without shelling out to one CLI command per operation.
+review grants, produce presentations, and inspect vault metadata without
+shelling out to one CLI command per operation.
 
 It is not a network service. It does not open a port, does not authenticate
 remote clients, and does not bypass the same local approval rules used by the
-CLI.
+CLI. Grant approval and denial are intentionally not exposed on the stdio
+channel — those decisions must be made via the CLI (`cred grant approve` /
+`cred grant deny`) so that a stdin-controlling process cannot self-approve
+grants.
 
 ## Starting The Service
 
@@ -84,26 +87,6 @@ Params:
 
 - `grant`: required `cred.permission_grant` JSON object.
 - `source_uri`: optional source hint stored with the grant summary.
-
-### `cred.grant_approve`
-
-Writes an append-only `cred.grant_approval` record with `decision:
-"approved"` for the exact canonical hash of the supplied grant.
-
-Params:
-
-- `grant`: required `cred.permission_grant` JSON object.
-- `approval_id`: required local approval id.
-- `reviewer`: optional reviewer label.
-- `note`: optional approval note.
-- `source_uri`: optional source hint.
-
-### `cred.grant_deny`
-
-Writes an append-only `cred.grant_approval` record with `decision: "denied"`
-for the exact canonical hash of the supplied grant.
-
-Params are the same as `cred.grant_approve`.
 
 ### `cred.grant_approvals`
 

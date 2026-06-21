@@ -73,16 +73,13 @@ These are enforced in code and/or smoke tests. Any change must preserve them:
 
 These are known gaps, not yet fixed. Consider them before touching related code:
 
-1. **Stdio exposes `grant_approve`/`grant_deny` on the app-facing channel.**
-   Any stdin-controlling process can self-approve
-   (`crates/cred-cli/src/main.rs:614-631`, `673-690`).
-2. **Store is not crash-safe or tamper-evident.** JSONL appends have no fsync,
+1. **Store is not crash-safe or tamper-evident.** JSONL appends have no fsync,
    lock, or hash chain (`crates/cred-store/src/lib.rs:523-555`).
-3. **Grant `cred_signature` is shape-validated only, not cryptographically
+2. **Grant `cred_signature` is shape-validated only, not cryptographically
    verified.** `crates/cred-core/src/lib.rs:491-493`.
-4. **`app_pubkey` is not used to authenticate requests** — only string
+3. **`app_pubkey` is not used to authenticate requests** — only string
    `app_id` is compared (`crates/cred-core/src/lib.rs:385-387`).
-5. **Canonical JSON is a local implementation, not RFC 8785/JCS** —
+4. **Canonical JSON is a local implementation, not RFC 8785/JCS** —
    cross-language consumers need a spec (`crates/cred-core/src/lib.rs:812-855`).
 
 ## Conventions

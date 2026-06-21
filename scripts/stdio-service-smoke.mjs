@@ -65,6 +65,9 @@ const info = result('info');
 if (!info.methods?.includes('cred.present') || info.transport !== 'stdio') {
   throw new Error('service info did not advertise stdio presentation support');
 }
+if (info.methods?.includes('cred.grant_approve')) {
+  throw new Error('service info must not advertise grant_approve on stdio channel');
+}
 
 const review = result('review');
 if (review.artifact_type !== 'cred.grant_review') {
@@ -77,14 +80,6 @@ if (review.warnings?.includes('Grant does not bind an app public key.') !== true
 const imported = result('import');
 if (imported.artifact_type !== 'cred.stored_grant') {
   throw new Error(`unexpected imported grant artifact_type: ${imported.artifact_type}`);
-}
-
-const approval = result('approve');
-if (approval.artifact_type !== 'cred.grant_approval' || approval.decision !== 'approved') {
-  throw new Error('grant approval response was not approved');
-}
-if (approval.grant_hash !== imported.grant_hash) {
-  throw new Error('approval hash does not match imported grant hash');
 }
 
 const presentation = result('present');
@@ -106,8 +101,8 @@ if (inventory.total_grants !== 1 || inventory.total_grant_approvals !== 1) {
 if (inventory.total_presentations !== 1 || inventory.disclosure_modes?.embedded !== 1) {
   throw new Error('inventory did not include the stdio presentation audit');
 }
-if (inventory.presentations?.[0]?.approval_id !== approval.approval_id) {
-  throw new Error('presentation audit did not retain the stdio approval id');
+if (inventory.presentations?.[0]?.approval_id !== 'approval-stdio-witness-1') {
+  throw new Error('presentation audit did not retain the CLI approval id');
 }
 
 console.log('Cred stdio service smoke passed.');

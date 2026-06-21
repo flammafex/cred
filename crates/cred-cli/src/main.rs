@@ -523,15 +523,6 @@ struct ServiceGrantParams {
 }
 
 #[derive(Debug, Deserialize)]
-struct ServiceGrantDecisionParams {
-    grant: Value,
-    approval_id: String,
-    reviewer: Option<String>,
-    note: Option<String>,
-    source_uri: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct ServicePresentParams {
     request: Value,
     artifact: Option<Value>,
@@ -605,8 +596,6 @@ fn handle_service_request(request: ServiceRequest, store_path: Option<PathBuf>) 
         "cred.vault_inventory" => to_json_value(vault_inventory_value(store_path)?),
         "cred.grant_review" => service_grant_review(request.params),
         "cred.grant_import" => service_grant_import(request.params, store_path),
-        "cred.grant_approve" => service_grant_decision(request.params, store_path, "approved"),
-        "cred.grant_deny" => service_grant_decision(request.params, store_path, "denied"),
         "cred.grant_approvals" => {
             let approvals = record_store(store_path)?.list_grant_approvals()?;
             to_json_value(serde_json::json!({
@@ -616,6 +605,10 @@ fn handle_service_request(request: ServiceRequest, store_path: Option<PathBuf>) 
             }))
         }
         "cred.present" => service_present(request.params, store_path),
+        // grant_approve and grant_deny are intentionally not exposed on the
+        // app-facing stdio channel. Approvals must be made via the CLI
+        // (cred grant approve / cred grant deny) so that a stdin-controlling
+        // process cannot self-approve grants.
         other => bail!("unsupported service method: {other}"),
     }
 }
@@ -632,8 +625,6 @@ fn service_info(store_path: Option<PathBuf>) -> Result<Value> {
             "cred.vault_inventory",
             "cred.grant_review",
             "cred.grant_import",
-            "cred.grant_approve",
-            "cred.grant_deny",
             "cred.grant_approvals",
             "cred.present"
         ],
@@ -653,25 +644,6 @@ fn service_grant_import(params: Value, store_path: Option<PathBuf>) -> Result<Va
     to_json_value(import_grant(
         &grant,
         grant_hash,
-        params.source_uri,
-        store_path,
-    )?)
-}
-
-fn service_grant_decision(
-    params: Value,
-    store_path: Option<PathBuf>,
-    decision: &'static str,
-) -> Result<Value> {
-    let params: ServiceGrantDecisionParams = service_params(params)?;
-    let (grant, grant_hash) = parse_grant_with_hash(params.grant)?;
-    to_json_value(decide_grant(
-        &grant,
-        grant_hash,
-        decision,
-        params.approval_id,
-        params.reviewer,
-        params.note,
         params.source_uri,
         store_path,
     )?)
