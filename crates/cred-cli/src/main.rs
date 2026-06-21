@@ -1,12 +1,13 @@
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use cred_core::{
-    artifact_record, artifact_type, canonical_hash_hex, enforce_grant, manifest,
+    artifact_record, artifact_type, canonical_hash_hex, canonical_json, enforce_grant, manifest,
     public_key_from_secret_hex, sign_presentation, validate_and_hash,
     verify_presentation_signature, CredActionRequest, CredEndpoint, CredPermissionGrant,
     CredPresentation, GrantUsage, PresentedArtifact,
 };
 use cred_store::{GrantApproval, PresentationAuditEntry, RecordStore, StoredGrant};
+use ed25519_dalek::{Signer, SigningKey};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,6 +58,12 @@ enum Command {
     Matchlock {
         #[command(subcommand)]
         command: MatchlockCommand,
+    },
+    /// Work with Social Graph attestations through Cred.
+    #[command(name = "social_graph")]
+    SocialGraph {
+        #[command(subcommand)]
+        command: SocialGraphCommand,
     },
     /// Build Cred artifacts from existing JSON.
     Record {
@@ -171,6 +178,14 @@ enum MatchlockCommand {
     ImportArtifact(MatchlockImportArtifactCommand),
     /// Present an imported Matchlock artifact by reference.
     PresentArtifact(MatchlockPresentArtifactCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum SocialGraphCommand {
+    /// Import a social_graph.attestation into Cred records.
+    ImportAttestation(SocialGraphImportAttestationCommand),
+    /// Present an imported social_graph.attestation embedded in a signed presentation.
+    PresentAttestation(SocialGraphPresentAttestationCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -348,6 +363,51 @@ struct MatchlockPresentArtifactCommand {
 }
 
 #[derive(Debug, Args)]
+struct SocialGraphImportAttestationCommand {
+    attestation: PathBuf,
+    #[arg(long)]
+    record_id: String,
+    #[arg(long)]
+    cred_id: String,
+    #[arg(long, default_value = "selective")]
+    privacy: String,
+    #[arg(long, default_value = "local_encrypted")]
+    custody: String,
+    #[arg(long)]
+    artifact_uri: Option<String>,
+    #[arg(long = "label")]
+    labels: Vec<String>,
+    #[arg(long, env = "CRED_VAULT_PASSPHRASE")]
+    vault_passphrase: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct SocialGraphPresentAttestationCommand {
+    #[arg(long)]
+    request: PathBuf,
+    #[arg(long)]
+    grant: PathBuf,
+    #[arg(long)]
+    approval_id: String,
+    #[arg(long)]
+    record_id: String,
+    #[arg(long)]
+    presentation_id: String,
+    #[arg(long)]
+    cred_id: String,
+    #[arg(long)]
+    request_binding_hash: String,
+    #[arg(long, env = "CRED_CONTROLLER_SK")]
+    signing_key: PathBuf,
+    #[arg(long, default_value_t = 0)]
+    uses_so_far: u64,
+    #[arg(long)]
+    now: Option<u64>,
+    #[arg(long, env = "CRED_VAULT_PASSPHRASE")]
+    vault_passphrase: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct RecordGetCommand {
     record_id: String,
 }
@@ -443,6 +503,7 @@ fn main() -> Result<()> {
         Command::Witness { command } => witness(command, store),
         Command::Freebird { command } => freebird(command, store),
         Command::Matchlock { command } => matchlock(command, store),
+        Command::SocialGraph { command } => social_graph(command, store),
         Command::Record { command } => record(command, store),
         Command::Vault { command } => vault(command, store),
         Command::Grant { command } => grant(command, store),
@@ -513,7 +574,7 @@ fn serve_stdio(store_path: Option<PathBuf>) -> Result<()> {
                 service_response(
                     id,
                     handle_service_request(request, store_path.clone())
-                        .with_context(|| format!("service method failed")),
+                        .context("service method failed"),
                 )
             }
             Err(error) => service_response(
@@ -985,6 +1046,191 @@ fn ensure_freebird_check_request(value: &Value) -> Result<()> {
 
 fn is_base64url_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+}
+
+fn social_graph(command: SocialGraphCommand, store_path: Option<PathBuf>) -> Result<()> {
+    match command {
+        SocialGraphCommand::ImportAttestation(command) => {
+            social_graph_import_attestation(command, store_path)
+        }
+        SocialGraphCommand::PresentAttestation(command) => {
+            social_graph_present_attestation(command, store_path)
+        }
+    }
+}
+
+fn social_graph_import_attestation(
+    command: SocialGraphImportAttestationCommand,
+    store_path: Option<PathBuf>,
+) -> Result<()> {
+    let value = read_json(&command.attestation)?;
+    ensure_social_graph_attestation(&value)?;
+    let artifact_hash = canonical_hash_hex(&value)?;
+    let artifact_uri = artifact_uri_for_custody(
+        &command.custody,
+        command.artifact_uri,
+        &command.record_id,
+        &command.attestation,
+    )?;
+    let object = value.as_object().expect("validated JSON object");
+    let source_app = object
+        .get("attester_id")
+        .and_then(Value::as_str)
+        .context("social_graph.attestation missing attester_id")?
+        .to_owned();
+    let policy_id = object
+        .get("policy_id")
+        .and_then(Value::as_str)
+        .context("social_graph.attestation missing policy_id")?
+        .to_owned();
+    let mut labels = command.labels;
+    if !labels.iter().any(|label| label == "social_graph") {
+        labels.push("social_graph".to_owned());
+    }
+    if !labels.iter().any(|label| label == &policy_id) {
+        labels.push(policy_id);
+    }
+    let vault_passphrase = command.vault_passphrase;
+    let record = artifact_record(
+        command.record_id,
+        command.cred_id,
+        "social_graph.attestation".to_owned(),
+        artifact_hash,
+        artifact_uri,
+        command.privacy,
+        command.custody,
+        Some(source_app),
+        now_unix()?,
+        Some(labels),
+    );
+    store_record_with_optional_artifact(record, &value, vault_passphrase.as_deref(), store_path)
+}
+
+fn social_graph_present_attestation(
+    command: SocialGraphPresentAttestationCommand,
+    store_path: Option<PathBuf>,
+) -> Result<()> {
+    ensure_lower_hex(&command.request_binding_hash, "request_binding_hash", 32)?;
+    let store = record_store(store_path.clone())?;
+    let Some(record) = store.get_record(&command.record_id)? else {
+        bail!("record not found: {}", command.record_id);
+    };
+    ensure!(
+        record.cred_id == command.cred_id,
+        "record cred_id does not match presentation cred_id"
+    );
+    ensure!(
+        record.stored_artifact_type == "social_graph.attestation",
+        "record is not a social_graph.attestation: {}",
+        record.stored_artifact_type
+    );
+    let attestation = read_record_artifact(&store, &record, command.vault_passphrase.as_deref())?;
+    ensure_social_graph_attestation(&attestation)?;
+    ensure!(
+        canonical_hash_hex(&attestation)? == record.artifact_hash,
+        "stored attestation hash does not match record"
+    );
+    let request = read_action_request(&command.request)?;
+    let (grant, grant_hash) = read_grant_with_hash(&command.grant)?;
+    require_approved_grant(
+        store_path.clone(),
+        &grant,
+        &grant_hash,
+        Some(&command.approval_id),
+    )?;
+    let now = command.now.unwrap_or(now_unix()?);
+    enforce_presentation_grant(
+        &grant,
+        &request,
+        &command.cred_id,
+        "social_graph.attestation",
+        GrantUsage {
+            now,
+            uses_so_far: command.uses_so_far,
+        },
+    )
+    .context("permission grant denied social graph presentation")?;
+
+    let mut presentation = serde_json::json!({
+        "contract_version": "sophia/v1",
+        "artifact_type": "cred.presentation",
+        "presentation_id": command.presentation_id,
+        "cred_id": command.cred_id,
+        "request_id": request.request_id,
+        "grant_id": grant.grant_id,
+        "app_id": request.app_id,
+        "created_at": now_unix()?,
+        "artifacts": [{
+            "artifact_type": "social_graph.attestation",
+            "artifact_hash": record.artifact_hash,
+            "record_id": record.record_id,
+            "disclosure": "embedded",
+            "artifact": attestation
+        }],
+        "request_binding_hash": command.request_binding_hash
+    });
+    let secret_key_hex = read_secret_key(&command.signing_key)?;
+    let secret_key = hex::decode(secret_key_hex.trim()).context("decode controller secret key")?;
+    let secret_key: [u8; 32] = secret_key
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("controller secret key must be 32 bytes"))?;
+    let signing_key = SigningKey::from_bytes(&secret_key);
+    let signature = signing_key.sign(&canonical_json(&presentation)?);
+    presentation["presentation_signature"] = Value::String(hex::encode(signature.to_bytes()));
+    print_json(&presentation)
+}
+
+fn ensure_social_graph_attestation(value: &Value) -> Result<()> {
+    let object = value
+        .as_object()
+        .context("social_graph.attestation must be a JSON object")?;
+    ensure!(
+        object.get("contract_version").and_then(Value::as_str) == Some("sophia/v1"),
+        "social_graph.attestation contract_version must be sophia/v1"
+    );
+    ensure!(
+        object.get("artifact_type").and_then(Value::as_str) == Some("social_graph.attestation"),
+        "expected artifact_type social_graph.attestation"
+    );
+    ensure_non_empty_string_field(object, "attester_id")?;
+    ensure_non_empty_string_field(object, "policy_id")?;
+    Ok(())
+}
+
+fn read_record_artifact(
+    store: &RecordStore,
+    record: &cred_core::CredArtifactRecord,
+    vault_passphrase: Option<&str>,
+) -> Result<Value> {
+    match record.custody.as_str() {
+        "local_encrypted" => store
+            .read_encrypted_artifact(
+                record,
+                vault_passphrase.context(
+                    "local_encrypted custody requires --vault-passphrase or CRED_VAULT_PASSPHRASE",
+                )?,
+            )
+            .context("read encrypted artifact"),
+        "external_reference" => {
+            let uri = record
+                .artifact_uri
+                .as_ref()
+                .context("external_reference record missing artifact_uri")?;
+            read_json(&PathBuf::from(uri))
+        }
+        other => bail!("unsupported custody for social graph presentation: {other}"),
+    }
+}
+
+fn ensure_lower_hex(value: &str, field: &str, expected_bytes: usize) -> Result<()> {
+    ensure!(
+        value.len() == expected_bytes * 2
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+        "{field} must be lowercase hex for exactly {expected_bytes} bytes"
+    );
+    Ok(())
 }
 
 fn matchlock(command: MatchlockCommand, store_path: Option<PathBuf>) -> Result<()> {
@@ -1671,6 +1917,7 @@ fn grant_decision(
     print_json(&approval)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decide_grant(
     grant: &CredPermissionGrant,
     grant_hash: String,
@@ -2206,6 +2453,7 @@ fn now_unix() -> Result<u64> {
 mod tests {
     use super::*;
     use cred_core::{artifact_record, CredAction, CredGrantConstraints};
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -2276,6 +2524,150 @@ mod tests {
         assert!(err
             .to_string()
             .contains("request does not allow presented artifact type"));
+    }
+
+    #[test]
+    fn test_import_attestation() {
+        let root = temp_store_root("social-graph-import");
+        social_graph_import_attestation(
+            SocialGraphImportAttestationCommand {
+                attestation: social_graph_example("social-graph-attestation.json"),
+                record_id: "record-social-graph-attestation-1".to_owned(),
+                cred_id: "cred:local:example".to_owned(),
+                privacy: "selective".to_owned(),
+                custody: "external_reference".to_owned(),
+                artifact_uri: Some(
+                    social_graph_example("social-graph-attestation.json")
+                        .display()
+                        .to_string(),
+                ),
+                labels: Vec::new(),
+                vault_passphrase: None,
+            },
+            Some(root.clone()),
+        )
+        .unwrap();
+
+        let record = RecordStore::new(&root)
+            .get_record("record-social-graph-attestation-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.stored_artifact_type, "social_graph.attestation");
+        assert_eq!(record.privacy, "selective");
+        assert_eq!(record.source_app.as_deref(), Some("attester:example:v1"));
+        assert_eq!(
+            record.labels.as_deref().unwrap(),
+            &["social_graph".to_owned(), "clout-trust-v1".to_owned()]
+        );
+        cleanup(root);
+    }
+
+    #[test]
+    fn test_present_attestation() {
+        let attestation =
+            read_json(&social_graph_example("social-graph-attestation.json")).unwrap();
+        let request = read_json(&social_graph_example(
+            "social-graph-presentation-request.json",
+        ))
+        .unwrap();
+        let request: CredActionRequest = serde_json::from_value(request).unwrap();
+        let grant = read_json(&social_graph_example("social-graph-permission-grant.json")).unwrap();
+        let grant: CredPermissionGrant = serde_json::from_value(grant).unwrap();
+        enforce_presentation_grant(
+            &grant,
+            &request,
+            "cred:local:example",
+            "social_graph.attestation",
+            GrantUsage {
+                now: 1718999800,
+                uses_so_far: 0,
+            },
+        )
+        .unwrap();
+        let secret_key = [0x22; 32];
+        let signing_key = SigningKey::from_bytes(&secret_key);
+        let mut presentation = serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "cred.presentation",
+            "presentation_id": "presentation-social-graph-1",
+            "cred_id": "cred:local:example",
+            "request_id": request.request_id,
+            "grant_id": grant.grant_id,
+            "app_id": request.app_id,
+            "created_at": 1718999800_u64,
+            "artifacts": [{
+                "artifact_type": "social_graph.attestation",
+                "artifact_hash": canonical_hash_hex(&attestation).unwrap(),
+                "record_id": "record-social-graph-attestation-1",
+                "disclosure": "embedded",
+                "artifact": attestation
+            }],
+            "request_binding_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        });
+        let signature = signing_key.sign(&canonical_json(&presentation).unwrap());
+        presentation["presentation_signature"] = Value::String(hex::encode(signature.to_bytes()));
+
+        assert_eq!(
+            presentation["request_binding_hash"].as_str().unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert!(presentation["presentation_signature"].as_str().is_some());
+        let mut unsigned = presentation.clone();
+        unsigned
+            .as_object_mut()
+            .unwrap()
+            .remove("presentation_signature");
+        let signature_bytes: [u8; 64] =
+            hex::decode(presentation["presentation_signature"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        VerifyingKey::from_bytes(&signing_key.verifying_key().to_bytes())
+            .unwrap()
+            .verify(
+                &canonical_json(&unsigned).unwrap(),
+                &Signature::from_bytes(&signature_bytes),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_present_rejects_invalid_grant() {
+        let request = social_graph_request();
+        let mut grant = social_graph_grant();
+        grant.capabilities = vec!["freebird.present".to_owned()];
+        assert!(enforce_presentation_grant(
+            &grant,
+            &request,
+            "cred:local:example",
+            "social_graph.attestation",
+            GrantUsage {
+                now: 1718999800,
+                uses_so_far: 0
+            },
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("permission grant denied"));
+    }
+
+    #[test]
+    fn test_present_rejects_expired_grant() {
+        let request = social_graph_request();
+        let mut grant = social_graph_grant();
+        grant.constraints.expires_at = Some(1);
+        let err = enforce_presentation_grant(
+            &grant,
+            &request,
+            "cred:local:example",
+            "social_graph.attestation",
+            GrantUsage {
+                now: 1718999800,
+                uses_so_far: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("expired"));
     }
 
     #[test]
@@ -2562,6 +2954,29 @@ mod tests {
             created_at: 1,
             cred_signature: None,
         }
+    }
+
+    fn social_graph_example(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
+            .join(name)
+    }
+
+    fn social_graph_request() -> CredActionRequest {
+        serde_json::from_value(
+            read_json(&social_graph_example(
+                "social-graph-presentation-request.json",
+            ))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn social_graph_grant() -> CredPermissionGrant {
+        serde_json::from_value(
+            read_json(&social_graph_example("social-graph-permission-grant.json")).unwrap(),
+        )
+        .unwrap()
     }
 
     fn grant_hash(grant: &CredPermissionGrant) -> String {

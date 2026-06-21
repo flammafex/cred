@@ -1,0 +1,17 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "cred.action_request",
+  "request_id": "request-freebird-issue-1",
+  "app_id": "issuer:freebird:example",
+  "grant_id": "grant-social-graph-1",
+  "requested_at": 1718999701,
+  "purpose": "present a social graph eligibility attestation for Freebird issuance",
+  "actions": [
+    {
+      "kind": "social_graph.present",
+      "audience": "issuer:freebird:example",
+      "semantic": "not_used",
+      "artifact_type": "social_graph.attestation"
+    }
+  ]
+}

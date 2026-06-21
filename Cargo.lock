@@ -193,6 +193,8 @@ dependencies = [
  "clap",
  "cred-core",
  "cred-store",
+ "ed25519-dalek",
+ "hex",
  "serde",
  "serde_json",
 ]

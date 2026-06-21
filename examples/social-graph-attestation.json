@@ -1,0 +1,15 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "social_graph.attestation",
+  "version": "1",
+  "attester_id": "attester:example:v1",
+  "kid": "attester-key-2026-06",
+  "policy_id": "clout-trust-v1",
+  "issued_at": 1718999700,
+  "expires_at": 1719000000,
+  "eligibility_level": 2,
+  "quota_nullifier": "9e86d0818844414a0e2e5b7e4b7e4b7e4b7e4b7e4b7e4b7e4b7e4b7e4b7e4b7",
+  "jti": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "holder_commitment": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "signature": "9b4f1c2e3d4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+}

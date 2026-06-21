@@ -879,6 +879,7 @@ pub fn manifest(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn artifact_record(
     record_id: String,
     cred_id: String,

@@ -1,0 +1,23 @@
+{
+  "contract_version": "sophia/v1",
+  "artifact_type": "cred.permission_grant",
+  "grant_id": "grant-social-graph-1",
+  "cred_id": "cred:local:example",
+  "app_id": "issuer:freebird:example",
+  "capabilities": [
+    "social_graph.present"
+  ],
+  "constraints": {
+    "allowed_artifact_types": [
+      "social_graph.attestation"
+    ],
+    "allowed_audiences": [
+      "issuer:freebird:example"
+    ],
+    "max_uses": 1,
+    "expires_at": 1719000300,
+    "allow_export": false
+  },
+  "human_approval": "per_use",
+  "created_at": 1718999600
+}
