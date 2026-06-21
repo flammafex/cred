@@ -1,11 +1,8 @@
 # Cred
 
 Cred is a local-first user agent for holding, granting, and presenting portable
-proofs.
-
-It is not a payments app, a universal profile, or a civil identity system. It
-is the user-owned boundary between apps and proof-bearing material: keys,
-credentials, attestations, commitments, signatures, receipts, and app
+proofs. It is the user-owned boundary between apps and proof-bearing material:
+keys, credentials, attestations, commitments, signatures, receipts, and app
 permissions.
 
 ## Standalone Role
@@ -152,18 +149,6 @@ Witness adapter smoke:
 ./scripts/vault-smoke.sh
 ./scripts/stdio-service-smoke.sh
 ```
-
-## Non-Goals
-
-Cred must not:
-
-- turn one controller key into a universal identity.
-- publish private keys, Matchlock secrets, or unspent credentials.
-- store plaintext artifacts in durable vault blobs.
-- put raw proof material in grant or presentation audit records.
-- treat HyperToken peer identity as authority.
-- make app-local claims trustworthy without app payload signatures or proofs.
-- silently grant unknown capabilities.
 
 ## First Implementation Target
 
