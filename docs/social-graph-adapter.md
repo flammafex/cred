@@ -177,10 +177,10 @@ derives `request_binding_hash` and includes only the hash in the presentation.
 
 The response is a `cred.presentation` containing one embedded
 `social_graph.attestation`, a `request_binding_hash`, and a
-`presentation_signature`.
+`cred_signature`.
 
-`presentation_signature` is the Cred controller's Ed25519 signature over the
-canonical JSON form of the presentation with `presentation_signature` omitted.
+`cred_signature` is the Cred controller's Ed25519 signature over the
+canonical JSON form of the presentation with `cred_signature` omitted.
 This binds the imported attestation to the specific Freebird `app_id`,
 `request_id`, `grant_id`, and request binding hash.
 
@@ -218,13 +218,17 @@ This binds the imported attestation to the specific Freebird `app_id`,
     }
   ],
   "request_binding_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "presentation_signature": "7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b"
+  "cred_signature": {
+    "scheme": "ed25519",
+    "public_key": "d33b2e6f0e3f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b",
+    "signature": "7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b"
+  }
 }
 ```
 
 The client submits the complete presentation JSON as
-`SybilProof::SocialGraph.attestation` and the `presentation_signature` hex value
-as `SybilProof::SocialGraph.presentation`.
+`SybilProof::SocialGraph.attestation` and the `cred_signature.signature` hex
+value as `SybilProof::SocialGraph.presentation`.
 
 ## Example artifacts
 

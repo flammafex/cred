@@ -191,6 +191,8 @@ pub struct CredPresentation {
     pub created_at: u64,
     pub artifacts: Vec<PresentedArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_binding_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cred_signature: Option<CredSignature>,
 }
 
@@ -604,6 +606,9 @@ impl CredPresentation {
         }
         for artifact in &self.artifacts {
             artifact.validate()?;
+        }
+        if let Some(request_binding_hash) = &self.request_binding_hash {
+            validate_hex(request_binding_hash, "request_binding_hash", 32)?;
         }
         if let Some(signature) = &self.cred_signature {
             signature.validate("cred_signature")?;
@@ -1288,6 +1293,7 @@ mod tests {
                 disclosure: "reference".to_owned(),
                 artifact: None,
             }],
+            request_binding_hash: None,
             cred_signature: None,
         }
     }

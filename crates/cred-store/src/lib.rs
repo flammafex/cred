@@ -1085,6 +1085,7 @@ mod tests {
                 disclosure: "reference".to_owned(),
                 artifact: None,
             }],
+            request_binding_hash: None,
             cred_signature: None,
         }
     }

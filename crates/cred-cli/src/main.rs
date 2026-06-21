@@ -1,13 +1,12 @@
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use cred_core::{
-    artifact_record, artifact_type, canonical_hash_hex, canonical_json, enforce_grant, manifest,
+    artifact_record, artifact_type, canonical_hash_hex, enforce_grant, manifest,
     public_key_from_secret_hex, sign_presentation, validate_and_hash,
     verify_presentation_signature, CredActionRequest, CredEndpoint, CredPermissionGrant,
     CredPresentation, GrantUsage, PresentedArtifact,
 };
 use cred_store::{GrantApproval, PresentationAuditEntry, RecordStore, StoredGrant};
-use ed25519_dalek::{Signer, SigningKey};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1125,10 +1124,6 @@ fn social_graph_present_attestation(
         Some(&command.approval_id),
     )?;
     let now = command.now.unwrap_or(now_unix()?);
-    // Derive uses_so_far from the store rather than trusting a caller-supplied
-    // value. Note: social_graph presentations are not yet appended to the
-    // audit log (see AGENTS.md risk #3), so this may undercount until that is
-    // fixed. It is still more correct than accepting 0 from the caller.
     let uses_so_far = store.count_presentations_for_grant(&grant.grant_id)?;
     enforce_presentation_grant(
         &grant,
@@ -1142,32 +1137,34 @@ fn social_graph_present_attestation(
     )
     .context("permission grant denied social graph presentation")?;
 
-    let mut presentation = serde_json::json!({
-        "contract_version": "sophia/v1",
-        "artifact_type": "cred.presentation",
-        "presentation_id": command.presentation_id,
-        "cred_id": command.cred_id,
-        "request_id": request.request_id,
-        "grant_id": grant.grant_id,
-        "app_id": request.app_id,
-        "created_at": now_unix()?,
-        "artifacts": [{
-            "artifact_type": "social_graph.attestation",
-            "artifact_hash": record.artifact_hash,
-            "record_id": record.record_id,
-            "disclosure": "embedded",
-            "artifact": attestation
+    let presentation = CredPresentation {
+        contract_version: "sophia/v1".to_owned(),
+        artifact_type: "cred.presentation".to_owned(),
+        presentation_id: command.presentation_id,
+        cred_id: command.cred_id,
+        request_id: request.request_id,
+        grant_id: Some(grant.grant_id),
+        app_id: request.app_id,
+        created_at: now_unix()?,
+        artifacts: vec![PresentedArtifact {
+            artifact_type: "social_graph.attestation".to_owned(),
+            artifact_hash: record.artifact_hash,
+            record_id: Some(record.record_id),
+            disclosure: "embedded".to_owned(),
+            artifact: Some(attestation),
         }],
-        "request_binding_hash": command.request_binding_hash
-    });
+        request_binding_hash: Some(command.request_binding_hash),
+        cred_signature: None,
+    };
     let secret_key_hex = read_secret_key(&command.signing_key)?;
-    let secret_key = hex::decode(secret_key_hex.trim()).context("decode controller secret key")?;
-    let secret_key: [u8; 32] = secret_key
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("controller secret key must be 32 bytes"))?;
-    let signing_key = SigningKey::from_bytes(&secret_key);
-    let signature = signing_key.sign(&canonical_json(&presentation)?);
-    presentation["presentation_signature"] = Value::String(hex::encode(signature.to_bytes()));
+    let presentation = sign_presentation(presentation, &secret_key_hex)?;
+    verify_presentation_signature(&presentation)?;
+
+    let presentation_value = serde_json::to_value(&presentation)?;
+    let presentation_hash = canonical_hash_hex(&presentation_value)?;
+    let audit = PresentationAuditEntry::from_presentation(&presentation, presentation_hash, None);
+    store.append_presentation_audit(&audit)?;
+
     print_json(&presentation)
 }
 
@@ -2164,6 +2161,7 @@ fn build_presentation(input: PresentationBuild) -> Result<CredPresentation> {
             disclosure: input.source.disclosure,
             artifact: input.source.artifact,
         }],
+        request_binding_hash: None,
         cred_signature: None,
     };
     presentation.validate()?;
@@ -2443,7 +2441,6 @@ fn now_unix() -> Result<u64> {
 mod tests {
     use super::*;
     use cred_core::{artifact_record, CredAction, CredGrantConstraints};
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -2574,51 +2571,37 @@ mod tests {
             },
         )
         .unwrap();
-        let secret_key = [0x22; 32];
-        let signing_key = SigningKey::from_bytes(&secret_key);
-        let mut presentation = serde_json::json!({
-            "contract_version": "sophia/v1",
-            "artifact_type": "cred.presentation",
-            "presentation_id": "presentation-social-graph-1",
-            "cred_id": "cred:local:example",
-            "request_id": request.request_id,
-            "grant_id": grant.grant_id,
-            "app_id": request.app_id,
-            "created_at": 1718999800_u64,
-            "artifacts": [{
-                "artifact_type": "social_graph.attestation",
-                "artifact_hash": canonical_hash_hex(&attestation).unwrap(),
-                "record_id": "record-social-graph-attestation-1",
-                "disclosure": "embedded",
-                "artifact": attestation
+
+        let presentation = CredPresentation {
+            contract_version: "sophia/v1".to_owned(),
+            artifact_type: "cred.presentation".to_owned(),
+            presentation_id: "presentation-social-graph-1".to_owned(),
+            cred_id: "cred:local:example".to_owned(),
+            request_id: request.request_id,
+            grant_id: Some(grant.grant_id),
+            app_id: request.app_id,
+            created_at: 1718999800,
+            artifacts: vec![PresentedArtifact {
+                artifact_type: "social_graph.attestation".to_owned(),
+                artifact_hash: canonical_hash_hex(&attestation).unwrap(),
+                record_id: Some("record-social-graph-attestation-1".to_owned()),
+                disclosure: "embedded".to_owned(),
+                artifact: Some(attestation),
             }],
-            "request_binding_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        });
-        let signature = signing_key.sign(&canonical_json(&presentation).unwrap());
-        presentation["presentation_signature"] = Value::String(hex::encode(signature.to_bytes()));
+            request_binding_hash: Some(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
+            ),
+            cred_signature: None,
+        };
+        let secret_key = "2222222222222222222222222222222222222222222222222222222222222222";
+        let signed = sign_presentation(presentation, secret_key).unwrap();
+        verify_presentation_signature(&signed).unwrap();
 
         assert_eq!(
-            presentation["request_binding_hash"].as_str().unwrap(),
+            signed.request_binding_hash.as_deref().unwrap(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
-        assert!(presentation["presentation_signature"].as_str().is_some());
-        let mut unsigned = presentation.clone();
-        unsigned
-            .as_object_mut()
-            .unwrap()
-            .remove("presentation_signature");
-        let signature_bytes: [u8; 64] =
-            hex::decode(presentation["presentation_signature"].as_str().unwrap())
-                .unwrap()
-                .try_into()
-                .unwrap();
-        VerifyingKey::from_bytes(&signing_key.verifying_key().to_bytes())
-            .unwrap()
-            .verify(
-                &canonical_json(&unsigned).unwrap(),
-                &Signature::from_bytes(&signature_bytes),
-            )
-            .unwrap();
+        assert!(signed.cred_signature.is_some());
     }
 
     #[test]
