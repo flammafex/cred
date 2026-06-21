@@ -59,6 +59,10 @@ pub enum CredError {
     MissingPresentationSignature,
     #[error("presentation signature verification failed")]
     SignatureVerificationFailed,
+    #[error("embedded disclosure requires an artifact")]
+    EmbeddedArtifactMissing,
+    #[error("embedded artifact hash does not match artifact_hash")]
+    EmbeddedArtifactHashMismatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -619,7 +623,27 @@ impl PresentedArtifact {
             "presented_artifact.disclosure",
             &self.disclosure,
             &["embedded", "reference", "redacted"],
-        )
+        )?;
+
+        match self.disclosure.as_str() {
+            "embedded" => {
+                let artifact = self
+                    .artifact
+                    .as_ref()
+                    .ok_or(CredError::EmbeddedArtifactMissing)?;
+                let computed = canonical_hash_hex(artifact)?;
+                if computed != self.artifact_hash {
+                    return Err(CredError::EmbeddedArtifactHashMismatch);
+                }
+            }
+            "reference" => {
+                if self.record_id.is_none() {
+                    return Err(CredError::EmptyField("presented_artifact.record_id"));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -1101,6 +1125,66 @@ mod tests {
             verify_presentation_signature(&tampered),
             Err(CredError::SignatureVerificationFailed)
         ));
+    }
+
+    #[test]
+    fn embedded_artifact_hash_mismatch_is_rejected() {
+        let mut presentation = example_presentation();
+        presentation.artifacts[0].disclosure = "embedded".to_owned();
+        presentation.artifacts[0].artifact = Some(serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "witness.signed_attestation",
+            "attestation": { "hash": "f2ca1bb6c7e907d06dafe4687e579fce7d08f0f2514ee1f2787e118c67d84fbf" }
+        }));
+        // artifact_hash is still "1111..." which won't match the embedded artifact
+
+        assert!(matches!(
+            presentation.validate(),
+            Err(CredError::EmbeddedArtifactHashMismatch)
+        ));
+    }
+
+    #[test]
+    fn embedded_disclosure_requires_artifact() {
+        let mut presentation = example_presentation();
+        presentation.artifacts[0].disclosure = "embedded".to_owned();
+        presentation.artifacts[0].artifact = None;
+        presentation.artifacts[0].record_id = None;
+
+        assert!(matches!(
+            presentation.validate(),
+            Err(CredError::EmbeddedArtifactMissing)
+        ));
+    }
+
+    #[test]
+    fn reference_disclosure_requires_record_id() {
+        let mut presentation = example_presentation();
+        presentation.artifacts[0].disclosure = "reference".to_owned();
+        presentation.artifacts[0].record_id = None;
+
+        assert!(matches!(
+            presentation.validate(),
+            Err(CredError::EmptyField("presented_artifact.record_id"))
+        ));
+    }
+
+    #[test]
+    fn embedded_artifact_with_matching_hash_passes() {
+        let artifact = serde_json::json!({
+            "contract_version": "sophia/v1",
+            "artifact_type": "witness.signed_attestation",
+            "attestation": { "hash": "f2ca1bb6c7e907d06dafe4687e579fce7d08f0f2514ee1f2787e118c67d84fbf" }
+        });
+        let hash = canonical_hash_hex(&artifact).unwrap();
+
+        let mut presentation = example_presentation();
+        presentation.artifacts[0].disclosure = "embedded".to_owned();
+        presentation.artifacts[0].artifact = Some(artifact);
+        presentation.artifacts[0].artifact_hash = hash;
+        presentation.artifacts[0].record_id = None;
+
+        presentation.validate().unwrap();
     }
 
     #[test]

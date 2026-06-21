@@ -79,15 +79,13 @@ These are known gaps, not yet fixed. Consider them before touching related code:
 2. **`social_graph present-attestation` bypasses `CredPresentation`/
    `cred_signature` and does not append a presentation audit entry.**
    `crates/cred-cli/src/main.rs:1154-1180`.
-3. **Presentation verification does not recompute embedded artifact hashes.**
-   `crates/cred-core/src/lib.rs:611-623`, `349-365`.
-4. **Store is not crash-safe or tamper-evident.** JSONL appends have no fsync,
+3. **Store is not crash-safe or tamper-evident.** JSONL appends have no fsync,
    lock, or hash chain (`crates/cred-store/src/lib.rs:523-555`).
-5. **Grant `cred_signature` is shape-validated only, not cryptographically
+4. **Grant `cred_signature` is shape-validated only, not cryptographically
    verified.** `crates/cred-core/src/lib.rs:491-493`.
-6. **`app_pubkey` is not used to authenticate requests** — only string
+5. **`app_pubkey` is not used to authenticate requests** — only string
    `app_id` is compared (`crates/cred-core/src/lib.rs:385-387`).
-7. **Canonical JSON is a local implementation, not RFC 8785/JCS** —
+6. **Canonical JSON is a local implementation, not RFC 8785/JCS** —
    cross-language consumers need a spec (`crates/cred-core/src/lib.rs:812-855`).
 
 ## Conventions
