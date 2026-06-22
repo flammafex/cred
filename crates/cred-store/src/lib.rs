@@ -760,6 +760,7 @@ fn decode_blob_hex(value: &str, field: &'static str) -> Result<Vec<u8>, StoreErr
 mod tests {
     use super::*;
     use cred_core::{artifact_record, CredGrantConstraints, PresentedArtifact};
+    use proptest::prelude::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -810,6 +811,65 @@ mod tests {
         assert!(matches!(err, StoreError::StoreBusy));
         locked_file.unlock().unwrap();
         cleanup(root);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
+
+        #[test]
+        fn prop_append_returns_store_busy_when_records_file_is_locked(record_id in "[a-z]{1,20}") {
+            let root = temp_store_root("prop-busy-records");
+            fs::create_dir_all(&root).unwrap();
+            let locked_file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(root.join(RECORDS_FILE))
+                .unwrap();
+            locked_file.lock_exclusive().unwrap();
+
+            let store = RecordStore::new(&root);
+            let err = store.append_record(&sample_record(&record_id)).unwrap_err();
+
+            prop_assert!(matches!(err, StoreError::StoreBusy));
+            locked_file.unlock().unwrap();
+            cleanup(root);
+        }
+
+        #[test]
+        fn prop_duplicate_record_ids_are_rejected(record_id in "[a-z]{1,20}") {
+            let root = temp_store_root("prop-duplicates");
+            let store = RecordStore::new(&root);
+            let record = sample_record(&record_id);
+
+            store.append_record(&record).unwrap();
+            let err = store.append_record(&record).unwrap_err();
+
+            prop_assert!(matches!(err, StoreError::DuplicateRecord(id) if id == record_id));
+            cleanup(root);
+        }
+
+        #[test]
+        fn prop_sequential_appends_all_persist_in_order(
+            record_ids in proptest::collection::vec("[a-z]{1,20}", 1..=20)
+                .prop_filter("record ids must be unique", |ids| {
+                    let mut sorted = ids.clone();
+                    sorted.sort();
+                    sorted.dedup();
+                    sorted.len() == ids.len()
+                })
+        ) {
+            let root = temp_store_root("prop-sequential-append");
+            let store = RecordStore::new(&root);
+            let records: Vec<_> = record_ids.iter().map(|id| sample_record(id)).collect();
+
+            for record in &records {
+                store.append_record(record).unwrap();
+            }
+
+            prop_assert_eq!(store.list_records().unwrap(), records);
+            cleanup(root);
+        }
     }
 
     #[test]
@@ -1046,6 +1106,89 @@ mod tests {
         assert!(matches!(err, StoreError::Crypto));
 
         cleanup(root);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(3))]
+
+        #[test]
+        fn prop_encrypt_decrypt_round_trip(
+            record_id in "[a-z]{1,20}",
+            name in "[a-z]{1,20}",
+            count in any::<i64>()
+        ) {
+            let root = temp_store_root("prop-encrypted-round-trip");
+            let store = RecordStore::new(&root);
+            let artifact = serde_json::json!({
+                "contract_version": "sophia/v1",
+                "artifact_type": "witness.signed_attestation",
+                "name": name,
+                "count": count
+            });
+            let record = encrypted_record(&record_id, canonical_hash_hex(&artifact).unwrap());
+
+            store.write_encrypted_artifact(&record, &artifact, "correct horse").unwrap();
+            let decrypted = store.read_encrypted_artifact(&record, "correct horse").unwrap();
+
+            prop_assert_eq!(decrypted, artifact);
+            cleanup(root);
+        }
+
+        #[test]
+        fn prop_wrong_passphrase_fails(
+            record_id in "[a-z]{1,20}",
+            value in any::<i64>(),
+            passphrase in "[a-z]{1,20}",
+            wrong_passphrase in "[a-z]{1,20}"
+        ) {
+            prop_assume!(passphrase != wrong_passphrase);
+            let root = temp_store_root("prop-wrong-passphrase");
+            let store = RecordStore::new(&root);
+            let artifact = serde_json::json!({
+                "contract_version": "sophia/v1",
+                "artifact_type": "witness.signed_attestation",
+                "value": value
+            });
+            let record = encrypted_record(&record_id, canonical_hash_hex(&artifact).unwrap());
+
+            store.write_encrypted_artifact(&record, &artifact, &passphrase).unwrap();
+            let err = store.read_encrypted_artifact(&record, &wrong_passphrase).unwrap_err();
+
+            prop_assert!(matches!(err, StoreError::Crypto));
+            cleanup(root);
+        }
+
+        #[test]
+        fn prop_ciphertext_tampering_fails(
+            record_id in "[a-z]{1,20}",
+            value in any::<i64>(),
+            tamper_position in any::<usize>()
+        ) {
+            let root = temp_store_root("prop-tampered-ciphertext");
+            let store = RecordStore::new(&root);
+            let artifact = serde_json::json!({
+                "contract_version": "sophia/v1",
+                "artifact_type": "witness.signed_attestation",
+                "value": value
+            });
+            let record = encrypted_record(&record_id, canonical_hash_hex(&artifact).unwrap());
+
+            store.write_encrypted_artifact(&record, &artifact, "correct horse").unwrap();
+            let blob_path = store.vault_blob_path(&record).unwrap();
+            let mut blob: EncryptedArtifactBlob =
+                serde_json::from_str(&fs::read_to_string(&blob_path).unwrap()).unwrap();
+            let mut ciphertext = hex::decode(&blob.ciphertext_hex).unwrap();
+            prop_assert!(!ciphertext.is_empty());
+            let index = tamper_position % ciphertext.len();
+            ciphertext[index] ^= 0x01;
+            blob.ciphertext_hex = hex::encode(ciphertext);
+            fs::write(&blob_path, serde_json::to_vec_pretty(&blob).unwrap()).unwrap();
+
+            let err = store.read_encrypted_artifact(&record, "correct horse").unwrap_err();
+
+            prop_assert!(matches!(err, StoreError::Crypto));
+            cleanup(root);
+        }
     }
 
     #[test]

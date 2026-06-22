@@ -1522,4 +1522,170 @@ mod tests {
             cred_signature: None,
         }
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_json_value() -> BoxedStrategy<Value> {
+            let leaf = prop_oneof![
+                Just(Value::Null),
+                any::<bool>().prop_map(Value::Bool),
+                any::<i64>().prop_map(|n| Value::Number(n.into())),
+                "[a-z]{0,20}".prop_map(Value::String),
+            ];
+            leaf.prop_recursive(
+                4,
+                64,
+                16,
+                |inner| {
+                    prop_oneof![
+                        prop::collection::vec(inner.clone(), 0..5).prop_map(Value::Array),
+                        prop::collection::vec(("[a-z]{1,5}", inner.clone()), 0..5).prop_map(
+                            |pairs| {
+                                let mut map = serde_json::Map::new();
+                                for (k, v) in pairs {
+                                    map.insert(k, v);
+                                }
+                                Value::Object(map)
+                            }
+                        ),
+                    ]
+                },
+            )
+            .boxed()
+        }
+
+        proptest! {
+            #[test]
+            fn canonical_json_is_idempotent(v in arb_json_value()) {
+                let canonical = canonical_json(&v).unwrap();
+                let reparsed: Value = serde_json::from_slice(&canonical).unwrap();
+                let recanonical = canonical_json(&reparsed).unwrap();
+                prop_assert_eq!(canonical, recanonical);
+            }
+
+            #[test]
+            fn canonical_json_is_deterministic(v in arb_json_value()) {
+                let first = canonical_json(&v).unwrap();
+                let second = canonical_json(&v).unwrap();
+                prop_assert_eq!(first, second);
+            }
+
+            #[test]
+            fn equivalent_objects_produce_same_canonical_form(
+                pairs in prop::collection::vec(("[a-z]{1,5}", arb_json_value()), 1..10)
+                    .prop_filter("unique keys", |pairs| {
+                        let mut seen = std::collections::HashSet::new();
+                        pairs.iter().all(|(k, _)| seen.insert(k.clone()))
+                    })
+            ) {
+                let mut map1 = serde_json::Map::new();
+                let mut map2 = serde_json::Map::new();
+                for (k, v) in &pairs {
+                    map1.insert(k.clone(), v.clone());
+                }
+                for (k, v) in pairs.into_iter().rev() {
+                    map2.insert(k, v);
+                }
+                let v1 = Value::Object(map1);
+                let v2 = Value::Object(map2);
+                let c1 = canonical_json(&v1).unwrap();
+                let c2 = canonical_json(&v2).unwrap();
+                prop_assert_eq!(c1, c2);
+            }
+
+            #[test]
+            fn canonical_json_rejects_floats(
+                f in any::<f64>().prop_filter("finite and non-integer", |f| f.is_finite() && f.fract() != 0.0)
+            ) {
+                let v = serde_json::json!(f);
+                let result = canonical_json(&v);
+                prop_assert!(matches!(result, Err(CredError::FloatNumber)));
+            }
+
+            #[test]
+            fn canonical_hash_is_deterministic(v in arb_json_value()) {
+                let h1 = canonical_hash_hex(&v).unwrap();
+                let h2 = canonical_hash_hex(&v).unwrap();
+                prop_assert_eq!(h1, h2);
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(16))]
+
+            #[test]
+            fn signed_presentation_tamper_breaks_verification(key_byte in any::<u8>()) {
+                let secret_key = format!("{:064x}", key_byte as u64);
+                let signed = sign_presentation(example_presentation(), &secret_key).unwrap();
+                verify_presentation_signature(&signed).unwrap();
+
+                let mut tampered = signed.clone();
+                tampered.app_id = format!("app:tampered:{key_byte}");
+                prop_assert!(verify_presentation_signature(&tampered).is_err());
+
+                let mut tampered = signed.clone();
+                tampered.presentation_id = format!("presentation-tampered-{key_byte}");
+                prop_assert!(verify_presentation_signature(&tampered).is_err());
+
+                let mut tampered = signed.clone();
+                tampered.created_at += 1;
+                prop_assert!(verify_presentation_signature(&tampered).is_err());
+            }
+
+            #[test]
+            fn signed_grant_tamper_breaks_verification(key_byte in any::<u8>()) {
+                let secret_key = format!("{:064x}", key_byte as u64);
+                let signed = sign_grant(example_grant(), &secret_key).unwrap();
+                verify_grant_signature(&signed).unwrap();
+
+                let mut tampered = signed.clone();
+                tampered.app_id = format!("app:tampered:{key_byte}");
+                prop_assert!(verify_grant_signature(&tampered).is_err());
+
+                let mut tampered = signed.clone();
+                tampered.grant_id = format!("grant-tampered-{key_byte}");
+                prop_assert!(verify_grant_signature(&tampered).is_err());
+            }
+
+            #[test]
+            fn signed_request_tamper_breaks_verification(key_byte in any::<u8>()) {
+                let secret_key = format!("{:064x}", key_byte as u64);
+                let signed = sign_action_request(example_request(), &secret_key).unwrap();
+                let app_pubkey = public_key_from_secret_hex(&secret_key).unwrap();
+                verify_action_request_signature(&signed, &app_pubkey).unwrap();
+
+                let mut tampered = signed.clone();
+                tampered.app_id = format!("app:tampered:{key_byte}");
+                prop_assert!(verify_action_request_signature(&tampered, &app_pubkey).is_err());
+
+                let mut tampered = signed.clone();
+                tampered.request_id = format!("request-tampered-{key_byte}");
+                prop_assert!(verify_action_request_signature(&tampered, &app_pubkey).is_err());
+            }
+
+            #[test]
+            fn app_pubkey_grant_rejects_unsigned_request(key_byte in any::<u8>()) {
+                let secret_key = format!("{:064x}", key_byte as u64);
+                let app_pubkey = public_key_from_secret_hex(&secret_key).unwrap();
+                let mut grant = example_grant();
+                grant.app_pubkey = Some(app_pubkey);
+
+                let request = example_request();
+                let result = enforce_grant(&grant, &request, GrantUsage {
+                    now: 1767225601,
+                    uses_so_far: 0,
+                });
+                prop_assert!(matches!(result, Err(CredError::MissingRequestSignature)));
+
+                let signed_request = sign_action_request(example_request(), &secret_key).unwrap();
+                let result = enforce_grant(&grant, &signed_request, GrantUsage {
+                    now: 1767225601,
+                    uses_so_far: 0,
+                });
+                prop_assert!(result.is_ok());
+            }
+        }
+    }
 }
