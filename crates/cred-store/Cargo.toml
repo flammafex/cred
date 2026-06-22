@@ -8,6 +8,7 @@ description = "Durable local record store for Cred artifact metadata"
 [dependencies]
 chacha20poly1305.workspace = true
 cred-core.workspace = true
+fs2 = "0.4"
 hex.workspace = true
 scrypt.workspace = true
 serde.workspace = true

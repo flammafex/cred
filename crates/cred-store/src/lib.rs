@@ -6,6 +6,7 @@ use cred_core::{
     artifact_type, canonical_hash_hex, canonical_json, CredArtifactRecord, CredPermissionGrant,
     CredPresentation,
 };
+use fs2::FileExt;
 use scrypt::{scrypt, Params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,8 @@ pub enum StoreError {
     },
     #[error("failed to encode record JSON: {0}")]
     Encode(#[source] serde_json::Error),
+    #[error("store file is busy; another writer holds the lock")]
+    StoreBusy,
     #[error("record already exists: {0}")]
     DuplicateRecord(String),
     #[error("grant already exists: {0}")]
@@ -227,13 +230,7 @@ impl RecordStore {
         }
 
         fs::create_dir_all(&self.root)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.records_path())?;
-        serde_json::to_writer(&mut file, record).map_err(StoreError::Encode)?;
-        file.write_all(b"\n")?;
-        Ok(())
+        self.append_json_line(self.records_path(), record)
     }
 
     pub fn list_records(&self) -> Result<Vec<CredArtifactRecord>, StoreError> {
@@ -243,10 +240,11 @@ impl RecordStore {
         }
 
         let file = File::open(path)?;
-        let reader = BufReader::new(file);
+        lock_shared(&file)?;
+        let mut reader = BufReader::new(file);
         let mut records = Vec::new();
 
-        for (index, line) in reader.lines().enumerate() {
+        for (index, line) in reader.by_ref().lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
@@ -259,6 +257,9 @@ impl RecordStore {
             record.validate()?;
             records.push(record);
         }
+
+        let file = reader.into_inner();
+        file.unlock()?;
 
         Ok(records)
     }
@@ -539,8 +540,18 @@ impl RecordStore {
             fs::create_dir_all(parent)?;
         }
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        serde_json::to_writer(&mut file, value).map_err(StoreError::Encode)?;
-        file.write_all(b"\n")?;
+        lock_exclusive(&file)?;
+
+        let result: Result<(), StoreError> = (|| {
+            serde_json::to_writer(&mut file, value).map_err(StoreError::Encode)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        let unlock_result = file.unlock().map_err(StoreError::Io);
+
+        result?;
+        unlock_result?;
         Ok(())
     }
 
@@ -550,10 +561,11 @@ impl RecordStore {
         }
 
         let file = File::open(path)?;
-        let reader = BufReader::new(file);
+        lock_shared(&file)?;
+        let mut reader = BufReader::new(file);
         let mut values = Vec::new();
 
-        for (index, line) in reader.lines().enumerate() {
+        for (index, line) in reader.by_ref().lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
@@ -566,7 +578,29 @@ impl RecordStore {
             );
         }
 
+        let file = reader.into_inner();
+        file.unlock()?;
+
         Ok(values)
+    }
+}
+
+fn lock_exclusive(file: &File) -> Result<(), StoreError> {
+    file.try_lock_exclusive().map_err(lock_error)
+}
+
+fn lock_shared(file: &File) -> Result<(), StoreError> {
+    file.try_lock_shared().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => StoreError::StoreBusy,
+        std::fs::TryLockError::Error(error) => StoreError::Io(error),
+    })
+}
+
+fn lock_error(error: std::io::Error) -> StoreError {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        StoreError::StoreBusy
+    } else {
+        StoreError::Io(error)
     }
 }
 
@@ -755,6 +789,40 @@ mod tests {
 
         assert!(matches!(err, StoreError::DuplicateRecord(id) if id == "record-1"));
 
+        cleanup(root);
+    }
+
+    #[test]
+    fn append_returns_store_busy_when_records_file_is_locked() {
+        let root = temp_store_root("busy-records");
+        fs::create_dir_all(&root).unwrap();
+        let locked_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(root.join(RECORDS_FILE))
+            .unwrap();
+        locked_file.lock_exclusive().unwrap();
+
+        let store = RecordStore::new(&root);
+        let err = store.append_record(&sample_record("record-1")).unwrap_err();
+
+        assert!(matches!(err, StoreError::StoreBusy));
+        locked_file.unlock().unwrap();
+        cleanup(root);
+    }
+
+    #[test]
+    fn synced_locked_append_still_persists_valid_jsonl() {
+        let root = temp_store_root("synced-append");
+        let store = RecordStore::new(&root);
+        let record_1 = sample_record("record-1");
+        let record_2 = sample_record("record-2");
+
+        store.append_record(&record_1).unwrap();
+        store.append_record(&record_2).unwrap();
+
+        assert_eq!(store.list_records().unwrap(), vec![record_1, record_2]);
         cleanup(root);
     }
 
