@@ -100,6 +100,11 @@ A `cred.action_request` is allowed only when it matches a
 
 - `app_id` must match.
 - `grant_id` must be present on the request and equal to the grant.
+- when the grant binds an `app_pubkey`, the request must include a valid
+  `app_signature` (Ed25519 over the canonical JSON of the request with
+  `app_signature` omitted). The signature's `public_key` must match the
+  grant's `app_pubkey`. Grants without `app_pubkey` remain in legacy mode
+  (local approval only).
 - every action `kind` must appear in the grant's `capabilities`.
 - action `audience` values must appear in `constraints.allowed_audiences` when
   that constraint is present.
@@ -128,6 +133,13 @@ linked into the presentation audit, but it does not override a later denial. A
 missing approval, hash mismatch, pinned denial, or latest denial blocks the
 presentation before any presentation audit entry is written. `cred grant check`
 remains a pure constraint check and does not require local approval.
+
+A grant's optional `cred_signature` is cryptographically verified when present
+(Ed25519 over the canonical JSON of the grant with `cred_signature` omitted).
+The signature is treated as provenance only — it does not replace local
+approval as the trust root. Unsigned grants remain valid. `cred grant review`
+reports the signature status as `verified`, `verification_failed`, or
+`unsigned`.
 
 ## Disclosure Modes
 

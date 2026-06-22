@@ -3,8 +3,8 @@ use clap::{Args, Parser, Subcommand};
 use cred_core::{
     artifact_record, artifact_type, canonical_hash_hex, enforce_grant, manifest,
     public_key_from_secret_hex, sign_presentation, validate_and_hash,
-    verify_presentation_signature, CredActionRequest, CredEndpoint, CredPermissionGrant,
-    CredPresentation, GrantUsage, PresentedArtifact,
+    verify_grant_signature, verify_presentation_signature, CredActionRequest, CredEndpoint,
+    CredPermissionGrant, CredPresentation, GrantUsage, PresentedArtifact,
 };
 use cred_store::{GrantApproval, PresentationAuditEntry, RecordStore, StoredGrant};
 use serde::de::DeserializeOwned;
@@ -1815,6 +1815,15 @@ fn grant_review(command: GrantReviewCommand) -> Result<()> {
 fn grant_review_value(grant: &CredPermissionGrant, grant_hash: String) -> Value {
     let summary = grant_review_summary(grant);
     let warnings = grant_review_warnings(grant);
+    let grant_signature_status = match &grant.cred_signature {
+        Some(_) => {
+            match verify_grant_signature(grant) {
+                Ok(()) => "verified",
+                Err(_) => "verification_failed",
+            }
+        }
+        None => "unsigned",
+    };
     serde_json::json!({
         "contract_version": "sophia/v1",
         "artifact_type": "cred.grant_review",
@@ -1827,6 +1836,7 @@ fn grant_review_value(grant: &CredPermissionGrant, grant_hash: String) -> Value 
         "constraints": grant.constraints,
         "human_approval": grant.human_approval,
         "created_at": grant.created_at,
+        "grant_signature_status": grant_signature_status,
         "summary": summary,
         "warnings": warnings
     })
@@ -1949,6 +1959,8 @@ fn parse_grant_with_hash(value: Value) -> Result<(CredPermissionGrant, String)> 
     let grant: CredPermissionGrant =
         serde_json::from_value(value.clone()).context("grant must be a cred.permission_grant")?;
     grant.validate()?;
+    verify_grant_signature(&grant)
+        .context("grant signature verification failed")?;
     let grant_hash = canonical_hash_hex(&value)?;
     Ok((grant, grant_hash))
 }
@@ -1988,6 +2000,9 @@ fn grant_review_warnings(grant: &CredPermissionGrant) -> Vec<String> {
     let mut warnings = Vec::new();
     if grant.app_pubkey.is_none() {
         warnings.push("Grant does not bind an app public key.".to_owned());
+    }
+    if grant.cred_signature.is_none() {
+        warnings.push("Grant is unsigned; local approval is the only trust root.".to_owned());
     }
     if grant.constraints.allowed_audiences.is_none() {
         warnings.push("Grant does not restrict audiences.".to_owned());
@@ -2927,6 +2942,7 @@ mod tests {
                 pool_id: None,
                 reason: None,
             }],
+            app_signature: None,
         }
     }
 

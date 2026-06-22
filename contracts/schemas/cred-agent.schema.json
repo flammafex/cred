@@ -200,7 +200,8 @@
               "type": "array",
               "items": { "$ref": "#/$defs/credAction" },
               "minItems": 1
-            }
+            },
+            "app_signature": { "$ref": "#/$defs/signature" }
           },
           "additionalProperties": false
         }

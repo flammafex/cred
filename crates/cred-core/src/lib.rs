@@ -63,6 +63,12 @@ pub enum CredError {
     EmbeddedArtifactMissing,
     #[error("embedded artifact hash does not match artifact_hash")]
     EmbeddedArtifactHashMismatch,
+    #[error("grant binds an app public key but request is missing app_signature")]
+    MissingRequestSignature,
+    #[error("request app_signature verification failed")]
+    RequestSignatureVerificationFailed,
+    #[error("grant cred_signature verification failed")]
+    GrantSignatureVerificationFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,6 +161,8 @@ pub struct CredActionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
     pub actions: Vec<CredAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_signature: Option<CredSignature>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -380,6 +388,112 @@ pub fn presentation_signature_payload(
     canonical_json(&value)
 }
 
+/// Computes the canonical JSON payload for a grant signature.
+/// The signature field is omitted from the signed payload, matching the
+/// presentation signature pattern.
+pub fn grant_signature_payload(grant: &CredPermissionGrant) -> Result<Vec<u8>, CredError> {
+    let mut unsigned = grant.clone();
+    unsigned.cred_signature = None;
+    unsigned.validate()?;
+    let value = serde_json::to_value(unsigned)?;
+    canonical_json(&value)
+}
+
+/// Verifies a grant's `cred_signature` if present. Grants without a
+/// `cred_signature` are valid — local approval remains the trust root.
+/// The signature is treated as provenance only, not authorization.
+pub fn verify_grant_signature(grant: &CredPermissionGrant) -> Result<(), CredError> {
+    grant.validate()?;
+    let Some(signature) = &grant.cred_signature else {
+        return Ok(());
+    };
+    let public_key = decode_hex_array::<32>(&signature.public_key, "signature.public_key")?;
+    let signature_bytes = decode_hex_array::<64>(&signature.signature, "signature.signature")?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&public_key).map_err(|_| CredError::InvalidPublicKey)?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let payload = grant_signature_payload(grant)?;
+    verifying_key
+        .verify(&payload, &signature)
+        .map_err(|_| CredError::GrantSignatureVerificationFailed)
+}
+
+/// Computes the canonical JSON payload for an action request signature.
+/// The `app_signature` field is omitted from the signed payload.
+pub fn action_request_signature_payload(request: &CredActionRequest) -> Result<Vec<u8>, CredError> {
+    let mut unsigned = request.clone();
+    unsigned.app_signature = None;
+    unsigned.validate()?;
+    let value = serde_json::to_value(unsigned)?;
+    canonical_json(&value)
+}
+
+/// Verifies that an action request was signed by the holder of the
+/// `app_pubkey` bound in the grant. Called by `enforce_grant` when
+/// `grant.app_pubkey` is present.
+pub fn verify_action_request_signature(
+    request: &CredActionRequest,
+    expected_app_pubkey: &str,
+) -> Result<(), CredError> {
+    request.validate()?;
+    let signature = request
+        .app_signature
+        .as_ref()
+        .ok_or(CredError::MissingRequestSignature)?;
+    if signature.public_key != expected_app_pubkey {
+        return Err(CredError::RequestSignatureVerificationFailed);
+    }
+    let public_key = decode_hex_array::<32>(&signature.public_key, "signature.public_key")?;
+    let signature_bytes = decode_hex_array::<64>(&signature.signature, "signature.signature")?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&public_key).map_err(|_| CredError::InvalidPublicKey)?;
+    let signature = Signature::from_bytes(&signature_bytes);
+    let payload = action_request_signature_payload(request)?;
+    verifying_key
+        .verify(&payload, &signature)
+        .map_err(|_| CredError::RequestSignatureVerificationFailed)
+}
+
+/// Signs an action request with an app secret key. Used for testing
+/// and by apps that need to produce signed requests.
+pub fn sign_action_request(
+    mut request: CredActionRequest,
+    secret_key_hex: &str,
+) -> Result<CredActionRequest, CredError> {
+    let secret_key = decode_hex_array::<32>(secret_key_hex.trim(), "secret_key")?;
+    let signing_key = SigningKey::from_bytes(&secret_key);
+    request.app_signature = None;
+    let payload = action_request_signature_payload(&request)?;
+    let signature = signing_key.sign(&payload);
+    request.app_signature = Some(CredSignature {
+        scheme: "ed25519".to_owned(),
+        public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+        signature: hex::encode(signature.to_bytes()),
+    });
+    request.validate()?;
+    Ok(request)
+}
+
+/// Signs a permission grant with a secret key. Used for testing and
+/// by grant issuers that want to bind provenance to a grant.
+pub fn sign_grant(
+    mut grant: CredPermissionGrant,
+    secret_key_hex: &str,
+) -> Result<CredPermissionGrant, CredError> {
+    let secret_key = decode_hex_array::<32>(secret_key_hex.trim(), "secret_key")?;
+    let signing_key = SigningKey::from_bytes(&secret_key);
+    grant.cred_signature = None;
+    let payload = grant_signature_payload(&grant)?;
+    let signature = signing_key.sign(&payload);
+    grant.cred_signature = Some(CredSignature {
+        scheme: "ed25519".to_owned(),
+        public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+        signature: hex::encode(signature.to_bytes()),
+    });
+    grant.validate()?;
+    Ok(grant)
+}
+
 pub fn enforce_grant(
     grant: &CredPermissionGrant,
     request: &CredActionRequest,
@@ -395,6 +509,13 @@ pub fn enforce_grant(
         Some(request_grant_id) if request_grant_id == &grant.grant_id => {}
         Some(_) => return Err(CredError::GrantIdMismatch),
         None => return Err(CredError::MissingGrantId),
+    }
+
+    // If the grant binds an app public key, the request must be signed by
+    // the holder of that key. Grants without app_pubkey remain in legacy
+    // mode (local approval only).
+    if let Some(app_pubkey) = &grant.app_pubkey {
+        verify_action_request_signature(request, app_pubkey)?;
     }
 
     if let Some(expires_at) = grant.constraints.expires_at {
@@ -550,6 +671,9 @@ impl CredActionRequest {
         }
         for action in &self.actions {
             action.validate()?;
+        }
+        if let Some(signature) = &self.app_signature {
+            signature.validate("app_signature")?;
         }
         Ok(())
     }
@@ -1193,6 +1317,106 @@ mod tests {
     }
 
     #[test]
+    fn verify_grant_signature_accepts_unsigned_grant() {
+        let grant = example_grant();
+        assert!(grant.cred_signature.is_none());
+        verify_grant_signature(&grant).unwrap();
+    }
+
+    #[test]
+    fn verify_grant_signature_accepts_validly_signed_grant() {
+        let secret_key = "3333333333333333333333333333333333333333333333333333333333333333";
+        let grant = sign_grant(example_grant(), secret_key).unwrap();
+        verify_grant_signature(&grant).unwrap();
+    }
+
+    #[test]
+    fn verify_grant_signature_rejects_tampered_grant() {
+        let secret_key = "3333333333333333333333333333333333333333333333333333333333333333";
+        let mut grant = sign_grant(example_grant(), secret_key).unwrap();
+        grant.app_id = "app:clout:local".to_owned();
+        assert!(matches!(
+            verify_grant_signature(&grant),
+            Err(CredError::GrantSignatureVerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn enforce_grant_requires_app_signature_when_grant_binds_pubkey() {
+        let secret_key = "4444444444444444444444444444444444444444444444444444444444444444";
+        let app_pubkey = public_key_from_secret_hex(secret_key).unwrap();
+        let mut grant = example_grant();
+        grant.app_pubkey = Some(app_pubkey);
+
+        // Unsigned request must be rejected.
+        let request = example_request();
+        assert!(matches!(
+            enforce_grant(
+                &grant,
+                &request,
+                GrantUsage {
+                    now: 1767225601,
+                    uses_so_far: 0,
+                },
+            ),
+            Err(CredError::MissingRequestSignature)
+        ));
+
+        // Signed request must pass.
+        let signed_request = sign_action_request(example_request(), secret_key).unwrap();
+        enforce_grant(
+            &grant,
+            &signed_request,
+            GrantUsage {
+                now: 1767225601,
+                uses_so_far: 0,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn enforce_grant_rejects_request_signed_by_wrong_key() {
+        let app_secret = "4444444444444444444444444444444444444444444444444444444444444444";
+        let app_pubkey = public_key_from_secret_hex(app_secret).unwrap();
+        let mut grant = example_grant();
+        grant.app_pubkey = Some(app_pubkey);
+
+        // Sign with a different key.
+        let wrong_key = "5555555555555555555555555555555555555555555555555555555555555555";
+        let signed_request = sign_action_request(example_request(), wrong_key).unwrap();
+
+        assert!(matches!(
+            enforce_grant(
+                &grant,
+                &signed_request,
+                GrantUsage {
+                    now: 1767225601,
+                    uses_so_far: 0,
+                },
+            ),
+            Err(CredError::RequestSignatureVerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn enforce_grant_allows_unsigned_request_when_grant_has_no_pubkey() {
+        let grant = example_grant();
+        assert!(grant.app_pubkey.is_none());
+        let request = example_request();
+        assert!(request.app_signature.is_none());
+        enforce_grant(
+            &grant,
+            &request,
+            GrantUsage {
+                now: 1767225601,
+                uses_so_far: 0,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn external_reference_records_require_uri() {
         let record = artifact_record(
             "record-1".to_owned(),
@@ -1272,6 +1496,7 @@ mod tests {
                     reason: None,
                 },
             ],
+            app_signature: None,
         }
     }
 
