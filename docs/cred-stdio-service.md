@@ -156,3 +156,31 @@ The stdio service preserves Cred's narrower role:
 - It signs Cred presentations, but the controller key is not a civil identity.
 - It records approvals and disclosures as metadata, but does not store raw
   proof material in audit records.
+
+## HTTP Transport
+
+`cred serve http` provides the same JSON request/response API over HTTP
+instead of stdin/stdout. It binds to `127.0.0.1:7331` by default (configurable
+with `--bind` and `--port`).
+
+```bash
+cargo run -p cred-cli -- --store ./tmp/cred-store serve http --port 7331
+```
+
+Send requests as HTTP POST to `/` with a JSON body using the same envelope
+as the stdio service:
+
+```bash
+curl -s -X POST http://127.0.0.1:7331/ \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"info","method":"cred.service_info"}'
+```
+
+The response is the same `cred.service_response` JSON object, with
+`transport: "http"` in the `cred.service_info` result.
+
+The HTTP service is localhost-only by default. It does not authenticate
+clients — bind to `0.0.0.0` only behind a reverse proxy with authentication.
+The same security boundaries as the stdio service apply: grant approval and
+denial are not exposed, and local CLI approval is required before
+presenting under a grant.

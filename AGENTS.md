@@ -17,9 +17,9 @@ artifacts those primitives create.
 
 | Path | Purpose |
 | --- | --- |
-| `crates/cred-core` | Artifact types, validation, canonical JSON, SHA-256 hashing, Ed25519 signing, grant enforcement. Single file: `src/lib.rs` (~1210 lines). |
-| `crates/cred-store` | Durable local JSONL store + encrypted vault (XChaCha20Poly1305 + scrypt). Single file: `src/lib.rs` (~1060 lines). |
-| `crates/cred-cli` | `cred` binary — all commands, stdio JSONL service, adapters. Single file: `src/main.rs` (~3017 lines). |
+| `crates/cred-core` | Artifact types, validation, canonical JSON, SHA-256 hashing, Ed25519 signing, grant enforcement. Single file: `src/lib.rs` (~1690 lines). |
+| `crates/cred-store` | Durable local JSONL store + encrypted vault (XChaCha20Poly1305 + scrypt). Single file: `src/lib.rs` (~1100 lines). |
+| `crates/cred-cli` | `cred` binary — all commands, stdio + HTTP services, adapters. Modular: `src/main.rs` (dispatch), `src/commands.rs`, `src/service/`, `src/adapters/`, `src/tests.rs`, etc. |
 | `contracts/schemas/cred-agent.schema.json` | Canonical JSON Schema for the five v1 artifacts. |
 | `docs/` | Protocol design (`cred-v1.md`), stdio service contract (`cred-stdio-service.md`), social graph adapter (`social-graph-adapter.md`). |
 | `examples/` | Fixtures for every artifact type, including stdio service request/response pairs. |
@@ -40,8 +40,9 @@ cargo clippy                 # lints (no config present)
 ./scripts/*-smoke.sh         # smoke tests (requires `node` on PATH; no npm install)
 ```
 
-Smoke scripts: `stdio-service-smoke.sh`, `freebird-adapter-smoke.sh`,
-`witness-adapter-smoke.sh`, `matchlock-adapter-smoke.sh`, `vault-smoke.sh`.
+Smoke scripts: `stdio-service-smoke.sh`, `http-service-smoke.sh`,
+`freebird-adapter-smoke.sh`, `witness-adapter-smoke.sh`,
+`matchlock-adapter-smoke.sh`, `vault-smoke.sh`.
 Each `.sh` builds `cred-cli`, provisions a temp store, runs a workflow, then
 invokes a matching `.mjs` checker that asserts on the output.
 

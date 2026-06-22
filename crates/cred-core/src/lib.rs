@@ -765,10 +765,8 @@ impl PresentedArtifact {
                     return Err(CredError::EmbeddedArtifactHashMismatch);
                 }
             }
-            "reference" => {
-                if self.record_id.is_none() {
-                    return Err(CredError::EmptyField("presented_artifact.record_id"));
-                }
+            "reference" if self.record_id.is_none() => {
+                return Err(CredError::EmptyField("presented_artifact.record_id"));
             }
             _ => {}
         }

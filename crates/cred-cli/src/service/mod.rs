@@ -1,3 +1,5 @@
+pub(crate) mod http;
+
 use crate::commands::*;
 use crate::grant::{grant_review_value, import_grant, parse_grant_with_hash};
 use crate::presentation::{build_presentation, parse_action_request, presentation_source_from_record, presentation_source_from_value, PresentationBuild, PresentationSource};
@@ -13,6 +15,7 @@ use std::path::PathBuf;
 pub(crate) fn serve(command: ServeCommand, store_path: Option<PathBuf>) -> Result<()> {
     match command {
         ServeCommand::Stdio => serve_stdio(store_path),
+        ServeCommand::Http(command) => crate::service::http::serve_http(command, store_path),
     }
 }
 
@@ -61,7 +64,7 @@ pub(crate) fn serve_stdio(store_path: Option<PathBuf>) -> Result<()> {
                 let id = request.id.clone();
                 service_response(
                     id,
-                    handle_service_request(request, store_path.clone())
+                    handle_service_request(request, store_path.clone(), "stdio")
                         .context("service method failed"),
                 )
             }
@@ -99,9 +102,13 @@ pub(crate) fn service_response(id: Value, result: Result<Value>) -> Value {
     }
 }
 
-pub(crate) fn handle_service_request(request: ServiceRequest, store_path: Option<PathBuf>) -> Result<Value> {
+pub(crate) fn handle_service_request(
+    request: ServiceRequest,
+    store_path: Option<PathBuf>,
+    transport: &str,
+) -> Result<Value> {
     match request.method.as_str() {
-        "cred.service_info" => service_info(store_path),
+        "cred.service_info" => service_info(store_path, transport),
         "cred.vault_inventory" => to_json_value(vault_inventory_value(store_path)?),
         "cred.grant_review" => service_grant_review(request.params),
         "cred.grant_import" => service_grant_import(request.params, store_path),
@@ -122,12 +129,12 @@ pub(crate) fn handle_service_request(request: ServiceRequest, store_path: Option
     }
 }
 
-pub(crate) fn service_info(store_path: Option<PathBuf>) -> Result<Value> {
+pub(crate) fn service_info(store_path: Option<PathBuf>, transport: &str) -> Result<Value> {
     let store = record_store(store_path)?;
     Ok(serde_json::json!({
         "contract_version": "sophia/v1",
         "artifact_type": "cred.service_info",
-        "transport": "stdio",
+        "transport": transport,
         "store_root": store.root().display().to_string(),
         "methods": [
             "cred.service_info",

@@ -174,6 +174,18 @@ pub(crate) enum SocialGraphCommand {
 pub(crate) enum ServeCommand {
     /// Serve newline-delimited JSON requests over stdin/stdout.
     Stdio,
+    /// Serve JSON requests over HTTP (localhost only).
+    Http(ServeHttpCommand),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ServeHttpCommand {
+    /// Port to listen on.
+    #[arg(long, default_value = "7331")]
+    pub(crate) port: u16,
+    /// Bind address (defaults to localhost only).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub(crate) bind: String,
 }
 
 #[derive(Debug, Args)]
